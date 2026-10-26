@@ -145,7 +145,9 @@ class Daemon:
                  detectors: DetectorSuite | None = None,
                  triage: AdvisoryTriage | None = None,
                  hub=None, exporter=None, approvals=None,
-                 export_every_s: float = 10.0) -> None:
+                 export_every_s: float = 10.0,
+                 metrics_path: Path | None = None) -> None:
+        self._metrics_path = Path(metrics_path) if metrics_path else None
         self._hub, self._exporter = hub, exporter
         self._approvals = approvals
         self._resolutions: queue.Queue = queue.Queue()
@@ -285,6 +287,59 @@ class Daemon:
                             "status": "down", "error": str(exc)})
         return out
 
+    def metrics_text(self) -> str:
+        """Prometheus exposition text (for the node_exporter textfile
+        collector — no listening port, no auth surface)."""
+        lines = []
+
+        def gauge(name, value, help_, kind="gauge", labels=""):
+            if value is None:
+                return
+            if not any(l.startswith(f"# TYPE {name} ") for l in lines):
+                lines.append(f"# HELP {name} {help_}")
+                lines.append(f"# TYPE {name} {kind}")
+            lines.append(f"{name}{labels} {value}")
+
+        gauge("sentinel_cycles_total", self.cycles, "Daemon poll cycles", "counter")
+        gauge("sentinel_decisions_total", self.decisions,
+              "Decisions recorded", "counter")
+        gauge("sentinel_alert_buffer_size", len(self._buffer),
+              "Correlation buffer size")
+        rank = {"healthy": 0, "degraded": 1, "down": 2}
+        for h in self.health():
+            lab = '{source="%s"}' % str(h.get("source", "?")).replace('"', "")
+            gauge("sentinel_source_status", rank.get(h.get("status"), 2),
+                  "0=healthy 1=degraded 2=down", labels=lab)
+            gauge("sentinel_source_packet_drops", h.get("packet_drops"),
+                  "Sensor-reported kernel drops", labels=lab)
+            gauge("sentinel_source_malformed_total",
+                  h.get("malformed_lines_skipped"),
+                  "Malformed input lines skipped", "counter", labels=lab)
+        if self._hub is not None:
+            gauge("sentinel_notifications_delivered_total", self._hub.delivered,
+                  "Notifications delivered", "counter")
+            gauge("sentinel_notifications_failed_total", self._hub.failures,
+                  "Notification send failures", "counter")
+            gauge("sentinel_notifications_suppressed_total", self._hub.suppressed,
+                  "Notifications dropped by the rate cap", "counter")
+        if self._exporter is not None:
+            gauge("sentinel_siem_exported_total", self._exporter.exported,
+                  "Verdicts exported to the SIEM", "counter")
+        if self._triage is not None:
+            gauge("sentinel_llm_triage_skipped_total", self._triage.skipped,
+                  "LLM triage calls skipped by the rate cap", "counter")
+        return "\n".join(lines) + "\n"
+
+    def write_metrics(self) -> None:
+        if self._metrics_path is None:
+            return
+        try:
+            tmp = self._metrics_path.with_suffix(".tmp")
+            tmp.write_text(self.metrics_text(), encoding="utf-8")
+            os.replace(tmp, self._metrics_path)
+        except OSError:
+            log.warning("metrics_write_failed", path=str(self._metrics_path))
+
     def write_health(self) -> None:
         """Atomically publish capture health for read-only consumers (Ops UI)."""
         if self._health_path is None:
@@ -308,6 +363,7 @@ class Daemon:
         while not stop.is_set():
             self.run_once()
             self.write_health()
+            self.write_metrics()
             stop.wait(poll_interval_s)
         if self._approvals is not None:
             self._approvals.stop()
@@ -365,7 +421,8 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
     return Daemon(sources=sources, engine=engine, store=store,
                   health_path=capture_dir / "live-health.json",
                   triage=triage, hub=hub, exporter=exporter,
-                  approvals=approvals)
+                  approvals=approvals,
+                  metrics_path=capture_dir / "sentinel.prom")
 
 
 def _build_notifiers(cfg: dict):

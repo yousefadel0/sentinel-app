@@ -260,3 +260,25 @@ siem:
 Not included: vendor firewall actuators (pfSense/Palo Alto/FortiGate) and
 SMTP — they cannot be validated without the real systems, and an untested
 actuator that talks to a production firewall is not something to ship.
+
+## Production hardening (Phase 6)
+
+* **Tamper-evident audit:** every audit row is linked into a SHA-256 hash
+  chain (`audit_chain`, append-only). `sentinel ctl audit verify <db>`
+  recomputes it and detects edited, deleted, spliced and out-of-band rows.
+  Rows that predate the chain are reported as `legacy_unchained`. Record
+  the printed `head` OUTSIDE the file and pass `--expect-head` later:
+  truncating the tail is only detectable against an external anchor.
+* **Metrics:** the daemon writes `<capture-dir>/sentinel.prom` in Prometheus
+  text format (node_exporter textfile collector) — no listening port.
+* **Image:** `infra/Dockerfile` has a HEALTHCHECK on `live-health.json`
+  freshness. Built and smoke-tested on Python 3.11 (boot, tail, decision,
+  audit verify, health = healthy).
+* **Throughput (detectors only, one core, synthetic flows):**
+  `python -m sentinel.evaluation.perf 3000 100` → ~290 ms per 1-second
+  cycle at 3,000 flows/s, so roughly 5-8k flows/s per process is the
+  ceiling; beyond that shard by sensor. Parsing cost is additional.
+  Beacon history is bounded by `max_tracked` (200k events).
+
+Not included: Helm chart / OVA / HA pair — they need target infrastructure to
+validate and are deliberately not shipped untested.

@@ -10,6 +10,11 @@ signal the Decision Engine already understands (``scan``,
 ``auth_fail_burst``, ``volume_spike``, ``beacon_periodic``,
 ``dns_tunneling``). A story is re-emitted only when it escalates (count
 doubled), so a long attack does not flood the audit store.
+
+Performance: events are indexed per key (source, destination, channel,
+DNS pair) and each cycle re-evaluates ONLY the keys that received new
+events, so cycle cost scales with traffic in the last second rather than
+with the size of the whole window.
 """
 from __future__ import annotations
 
@@ -33,16 +38,18 @@ _FLOW_MARKERS = frozenset({"zeek_conn", "flow_record"})
 BRUTE_PORTS = frozenset({21, 22, 23, 1433, 3306, 3389, 5900, 5985})
 BEACON_IGNORE_PORTS = frozenset({53, 123, 5353, 67, 68, 137, 138})
 
+_GC_EVERY_S = 10.0
+
 
 @dataclass(frozen=True)
 class DetectorConfig:
     window_s: int = 300
     beacon_window_s: int = 1800
     scan_min_targets: int = 20        # distinct (dst, dport) from one src
+    scan_burst_s: int = 30            # ...within this short burst window
     brute_min_conns: int = 15         # conns src->dst:port on auth ports
     ddos_min_sources: int = 50        # distinct sources -> one dst
     ddos_min_conns: int = 500
-    scan_burst_s: int = 30            # ...within this short burst window
     beacon_min_events: int = 12
     beacon_tolerance: float = 0.20    # gap within +-20% of the median gap
     beacon_min_fraction: float = 0.90  # share of gaps that must be regular
@@ -71,54 +78,106 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
 
+def _trim(dq: deque, lo: float) -> int:
+    """Drop events older than ``lo`` from the left; returns how many."""
+    n = 0
+    while dq and dq[0].t < lo:
+        dq.popleft()
+        n += 1
+    return n
+
+
 @dataclass
 class DetectorSuite:
     cfg: DetectorConfig = field(default_factory=DetectorConfig)
 
     def __post_init__(self) -> None:
-        self._events: deque[_Ev] = deque()
+        self._by_src: dict[str, deque] = defaultdict(deque)
+        self._by_dst: dict[str, deque] = defaultdict(deque)
+        self._chan: dict[tuple[str, str, int], deque] = defaultdict(deque)
+        self._dns: dict[tuple[str, str], deque] = defaultdict(deque)
+        self._dirty_src: set = set()
+        self._dirty_dst: set = set()
+        self._dirty_chan: set = set()
+        self._dirty_dns: set = set()
         self._latest = 0.0
-        self._emitted: dict[tuple[str, str, str], int] = {}
-        self._dirty = False
+        self._n = 0
+        self._last_gc = 0.0
+        self._emitted: dict[tuple[str, str, str], tuple[int, float]] = {}
+
+    @property
+    def tracked_events(self) -> int:
+        return self._n
 
     # -- ingestion ------------------------------------------------------- #
 
     def ingest(self, alerts) -> None:
         for a in alerts:
             sigs = set(a.signals)
-            if not (sigs & _FLOW_MARKERS or SUSPICIOUS_DNS in sigs):
+            is_flow = bool(sigs & _FLOW_MARKERS)
+            is_dns = SUSPICIOUS_DNS in sigs
+            if not (is_flow or is_dns):
                 continue
             try:
                 t = _epoch(a.ts)
             except ValueError:
                 continue
-            self._events.append(_Ev(t, a))
-            self._dirty = True
+            ev = _Ev(t, a)
             self._latest = max(self._latest, t)
-        horizon = self._latest - max(self.cfg.window_s, self.cfg.beacon_window_s)
-        while self._events and (self._events[0].t < horizon
-                                or len(self._events) > self.cfg.max_tracked):
-            self._events.popleft()
+            if is_flow:
+                self._by_src[a.src_ip].append(ev)
+                self._dirty_src.add(a.src_ip)
+                self._by_dst[a.dst_ip].append(ev)
+                self._dirty_dst.add(a.dst_ip)
+                self._n += 2
+                if a.dst_port not in BEACON_IGNORE_PORTS:
+                    key = (a.src_ip, a.dst_ip, a.dst_port)
+                    self._chan[key].append(ev)
+                    self._dirty_chan.add(key)
+                    self._n += 1
+            if is_dns:
+                key2 = (a.src_ip, a.dst_ip)
+                self._dns[key2].append(ev)
+                self._dirty_dns.add(key2)
+                self._n += 1
+        if (self._latest - self._last_gc >= _GC_EVERY_S
+                or self._n > self.cfg.max_tracked):
+            self._gc()
 
-    def _within(self, seconds: int):
-        lo = self._latest - seconds
-        return [e for e in self._events if e.t >= lo]
+    def _gc(self) -> None:
+        """Trim every index to its own window; shed oldest data if over cap."""
+        self._last_gc = self._latest
+        shrink = 1.0
+        while True:
+            for index, window in ((self._by_src, self.cfg.window_s),
+                                  (self._by_dst, self.cfg.window_s),
+                                  (self._dns, self.cfg.window_s),
+                                  (self._chan, self.cfg.beacon_window_s)):
+                lo = self._latest - window * shrink
+                for key in list(index):
+                    dq = index[key]
+                    self._n -= _trim(dq, lo)
+                    if not dq:
+                        del index[key]
+            if self._n <= self.cfg.max_tracked or shrink < 0.05:
+                return
+            shrink /= 2                  # still over budget: keep less history
 
     # -- detection ------------------------------------------------------- #
 
     def detect(self) -> list[Alert]:
-        if not self._dirty:                 # nothing new since last pass
-            return []
-        self._dirty = False
         # (signal, src, dst, count, threshold, members)
         found: list[tuple[str, str, str, int, int, list[_Ev]]] = []
-        recent = self._within(self.cfg.window_s)
-        flows = [e for e in recent if set(e.alert.signals) & _FLOW_MARKERS]
+        win_lo = self._latest - self.cfg.window_s
 
-        by_src: dict[str, list[_Ev]] = defaultdict(list)
-        for e in flows:
-            by_src[e.alert.src_ip].append(e)
-        for src, evs in by_src.items():
+        for src in self._dirty_src:
+            dq = self._by_src.get(src)
+            if dq is None:
+                continue
+            self._n -= _trim(dq, win_lo)
+            evs = [e for e in dq if e.t >= win_lo]
+            if not evs:
+                continue
             targets = self._burst_targets(evs)
             if len(targets) >= self.cfg.scan_min_targets:
                 per_dst: dict[str, int] = defaultdict(int)
@@ -136,10 +195,14 @@ class DetectorSuite:
                     found.append(("auth_fail_burst", src, dst, len(pe),
                                   self.cfg.brute_min_conns, pe))
 
-        by_dst: dict[str, list[_Ev]] = defaultdict(list)
-        for e in flows:
-            by_dst[e.alert.dst_ip].append(e)
-        for dst, evs in by_dst.items():
+        for dst in self._dirty_dst:
+            dq = self._by_dst.get(dst)
+            if dq is None:
+                continue
+            self._n -= _trim(dq, win_lo)
+            if len(dq) < self.cfg.ddos_min_conns:
+                continue
+            evs = [e for e in dq if e.t >= win_lo]
             srcs: dict[str, int] = defaultdict(int)
             for e in evs:
                 srcs[e.alert.src_ip] += 1
@@ -149,13 +212,15 @@ class DetectorSuite:
                 found.append(("volume_spike", top, dst, len(evs),
                               self.cfg.ddos_min_conns, evs))
 
-        beacon_flows = [e for e in self._within(self.cfg.beacon_window_s)
-                        if set(e.alert.signals) & _FLOW_MARKERS
-                        and e.alert.dst_port not in BEACON_IGNORE_PORTS]
-        chans: dict[tuple[str, str, int], list[_Ev]] = defaultdict(list)
-        for e in beacon_flows:
-            chans[(e.alert.src_ip, e.alert.dst_ip, e.alert.dst_port)].append(e)
-        for (src, dst, _p), evs in chans.items():
+        beacon_lo = self._latest - self.cfg.beacon_window_s
+        for key in self._dirty_chan:
+            dq = self._chan.get(key)
+            if dq is None:
+                continue
+            self._n -= _trim(dq, beacon_lo)
+            if len(dq) < self.cfg.beacon_min_events:
+                continue
+            evs = [e for e in dq if e.t >= beacon_lo]
             if len(evs) < self.cfg.beacon_min_events:
                 continue
             ts = sorted(e.t for e in evs)
@@ -166,18 +231,23 @@ class DetectorSuite:
             regular = sum(1 for g in gaps
                           if abs(g - med) <= self.cfg.beacon_tolerance * med)
             if regular / len(gaps) >= self.cfg.beacon_min_fraction:
-                found.append(("beacon_periodic", src, dst, len(evs),
+                found.append(("beacon_periodic", key[0], key[1], len(evs),
                               self.cfg.beacon_min_events, evs))
 
-        dns: dict[tuple[str, str], list[_Ev]] = defaultdict(list)
-        for e in recent:
-            if SUSPICIOUS_DNS in e.alert.signals:
-                dns[(e.alert.src_ip, e.alert.dst_ip)].append(e)
-        for (src, dst), evs in dns.items():
+        for key in self._dirty_dns:
+            dq = self._dns.get(key)
+            if dq is None:
+                continue
+            self._n -= _trim(dq, win_lo)
+            evs = [e for e in dq if e.t >= win_lo]
             if len(evs) >= self.cfg.dns_min_flagged:
-                found.append(("dns_tunneling", src, dst, len(evs),
+                found.append(("dns_tunneling", key[0], key[1], len(evs),
                               self.cfg.dns_min_flagged, evs))
 
+        self._dirty_src.clear()
+        self._dirty_dst.clear()
+        self._dirty_chan.clear()
+        self._dirty_dns.clear()
         return self._emit(found)
 
     def _burst_targets(self, evs: list[_Ev]) -> set[tuple[str, int]]:
@@ -186,6 +256,9 @@ class DetectorSuite:
         Scans fan out fast; ordinary clients touch many servers only slowly,
         so a short burst window separates the two.
         """
+        if len({(e.alert.dst_ip, e.alert.dst_port) for e in evs}) \
+                < self.cfg.scan_min_targets:
+            return set()                  # cannot reach the bar at all
         evs = sorted(evs, key=lambda e: e.t)
         best: set[tuple[str, int]] = set()
         lo = 0
@@ -199,17 +272,15 @@ class DetectorSuite:
 
     def _emit(self, found) -> list[Alert]:
         out: list[Alert] = []
-        live_keys = set()
         for signal, src, dst, count, threshold, members in found:
             key = (signal, src, dst)
-            live_keys.add(key)
             prev = self._emitted.get(key)
-            if prev is not None and count < 2 * prev:
+            if (prev is not None
+                    and self._latest - prev[1] < self.cfg.beacon_window_s
+                    and count < 2 * prev[0]):
                 continue
-            self._emitted[key] = count
+            self._emitted[key] = (count, self._latest)
             out.append(self._alert(signal, src, dst, count, threshold, members))
-        self._emitted = {k: v for k, v in self._emitted.items()
-                         if k in live_keys}
         return out
 
     @staticmethod

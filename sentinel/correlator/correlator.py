@@ -79,8 +79,9 @@ class Correlator:
                         signals.append(s)
             incidents.append(
                 Incident(
-                    incident_id=f"inc-{uuid.uuid5(uuid.NAMESPACE_URL,
-                                                  '|'.join(a.alert_id for a in group))}",
+                    incident_id="inc-" + str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "|".join(a.alert_id for a in group))),
                     src_ip=group[0].src_ip,
                     dst_ip=group[0].dst_ip,
                     alerts=tuple(group),

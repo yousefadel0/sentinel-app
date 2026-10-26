@@ -62,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skip-history", action="store_true",
                      help="on first start ignore lines already in the logs")
 
+    audit = ctl_sub.add_parser("audit", help="audit store integrity")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True)
+    ver = audit_sub.add_parser(
+        "verify", help="recompute the tamper-evidence hash chain")
+    ver.add_argument("path", metavar="SQLITE", help="audit store file")
+    ver.add_argument("--expect-head", metavar="HASH", default=None,
+                     help="externally anchored chain head (detects truncation)")
+
     intel = ctl_sub.add_parser("intel", help="read-only threat knowledge operations")
     intel_sub = intel.add_subparsers(dest="intel_command", required=True)
     sync = intel_sub.add_parser(
@@ -139,6 +147,22 @@ def main(argv: list[str] | None = None) -> int:
         log.info("config_valid", path=args.path, dry_run=args.dry_run)
         print(f"OK: config {args.path} is valid (ref §8)")
         return EXIT_OK
+
+    if args.command == "ctl" and args.ctl_command == "audit":
+        import json as _json
+        from pathlib import Path as _Path
+
+        from sentinel.auditstore.store import Store
+        if not _Path(args.path).is_file():
+            print(f"no such audit store: {args.path}", file=sys.stderr)
+            return EXIT_FAIL
+        store = Store(args.path)
+        try:
+            report = store.verify_chain(args.expect_head)
+        finally:
+            store.close()
+        print(_json.dumps(report, indent=2, sort_keys=True))
+        return EXIT_OK if report["ok"] else EXIT_FAIL
 
     if args.command == "ctl" and args.ctl_command == "intel":
         try:

@@ -211,3 +211,17 @@ def test_locked_engine_delegates(tmp_path):
     assert type(d._engine).__name__ == "LockedEngine"
     assert d._engine.pending_approvals() == {}
     store.close()
+
+
+def test_metrics_textfile_format(tmp_path):
+    now = [datetime(2026, 10, 20, 8, 0, 0, tzinfo=timezone.utc)]
+    d, store = _daemon(tmp_path, now)
+    d.run_once()
+    text = d.metrics_text()
+    assert "# TYPE sentinel_decisions_total counter" in text
+    assert 'sentinel_source_status{source="eve_json"} 2' in text   # no file yet
+    assert text.endswith("\n") and "None" not in text
+    d._metrics_path = tmp_path / "sentinel.prom"
+    d.write_metrics()
+    assert (tmp_path / "sentinel.prom").read_text() == text
+    store.close()

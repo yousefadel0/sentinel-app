@@ -1,0 +1,37 @@
+# Sentinel example config (strictly validated at boot — see Project.md §8).
+# Copy to config.yaml and edit. Secrets are NEVER written here: every
+# *_env key names an environment variable that holds the value.
+site:
+  name: customer-A
+  critical_assets:
+    - {ip: "10.0.0.4", hostname: "dc-01"}
+    - {ip: "10.0.0.5", hostname: "dns-primary"}
+capture_interfaces:
+  - {name: core_span, type: af_packet, iface: eth1}
+placement:
+  primary_tap: core_switch
+  secondary_tap: internet_edge
+  asymmetric_risk: medium
+monitored_vlans: [prod, mgmt]
+unmapped_vlans: [legacy_lab]
+has_nat: true
+brain: {llm_endpoint_env: SENTINEL_LLM_API, timeout_s: 8, hard_cutoff_s: 5}
+actuators:
+  - type: nftables_local
+autonomy_level: 0            # ALWAYS start in shadow
+limits: {max_blocks_per_min: 5, max_blocks_per_hour: 20, default_ttl_min: 30}
+audit_store: {path: /var/lib/sentinel/audit.sqlite}
+ops_ui:
+  enabled: false
+  bind: "127.0.0.1:8080"
+  auth_token_env: SENTINEL_OPS_UI_TOKEN
+  allowed_ports: [8080]
+# notifiers:
+#   - {type: webhook, url_env: SLACK_WEBHOOK_URL, format: slack}
+#   - {type: telegram, url_env: TG_BOT_TOKEN, chat_id: "123456", approvals: true}
+# siem:
+#   enabled: true
+#   inbound:  {enabled: true, source: wazuh, alerts_file: /var/ossec/logs/alerts/alerts.json,
+#              api_url: "unused", token_env: "unused", poll_interval_seconds: 5}
+#   outbound: {enabled: true, endpoint: "syslog+udp://siem.local:514",
+#              batch_size: 100, poll_interval_seconds: 10, token_env: SIEM_TOKEN}
