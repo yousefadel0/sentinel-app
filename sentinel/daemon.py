@@ -28,6 +28,8 @@ from sentinel.correlator import Correlator
 from sentinel.correlator.correlator import DEFAULT_CORRELATION_WINDOW_S, _parse_ts
 from sentinel.decision import AutonomyController, DecisionEngine, RateLimiter
 from sentinel.decision.chain import Facts
+from sentinel.detectors import DetectorSuite
+from sentinel.detectors.suite import is_incident_worthy
 from sentinel.logging_setup import get_logger
 from sentinel.models import Alert
 from sentinel.pilot.runner import _config_view
@@ -71,7 +73,9 @@ class Daemon:
                  store: Store, correlator: Correlator | None = None,
                  clock: Callable[[], datetime] = _utcnow,
                  window_s: int = DEFAULT_CORRELATION_WINDOW_S,
-                 health_path: Path | None = None) -> None:
+                 health_path: Path | None = None,
+                 detectors: DetectorSuite | None = None) -> None:
+        self._detectors = detectors if detectors is not None else DetectorSuite()
         self._health_path = Path(health_path) if health_path else None
         self._sources = list(sources)
         self._engine = engine
@@ -90,12 +94,18 @@ class Daemon:
     def run_once(self) -> int:
         """Poll sources, correlate, decide escalated incidents. Returns the
         number of decisions recorded this cycle."""
+        fresh: list[Alert] = []
         for src in self._sources:
             try:
-                self._buffer.extend(src.fetch())
+                fresh.extend(src.fetch())
             except Exception as exc:     # P4: a bad source never stops the loop
                 log.warning("source_fetch_failed",
                             source=getattr(src, "name", "?"), error=str(exc))
+        # Raw flow/dns records feed the behavioral detectors; only
+        # incident-worthy alerts (signature hits, detector output) correlate.
+        self._detectors.ingest(fresh)
+        self._buffer.extend(a for a in fresh if is_incident_worthy(a))
+        self._buffer.extend(self._detectors.detect())
         self._prune()
         made = 0
         for inc in self._corr.correlate(self._buffer):

@@ -200,3 +200,21 @@ sentinel --config config.yaml run --capture-dir /var/log/suricata
 
 `docker compose up -d` (see `docker-compose.yml`) runs Suricata + Zeek +
 Sentinel against one SPAN interface (`CAPTURE_IFACE`).
+
+## Behavioral detectors + evaluation (Phase 3)
+
+`sentinel/detectors/` turns raw Zeek `conn`/eve `flow` records and
+DNS-derived tokens into the attack signals the Decision Engine understands
+(scan, brute force, volumetric DDoS, C2 beaconing, DNS tunneling) as Tier B
+alerts. Raw records only feed the detectors; only signature hits and
+detector output enter correlation, so ordinary traffic never creates incidents.
+
+```bash
+python -m sentinel.evaluation.harness    # per-family recall/precision/MTTD
+```
+
+The harness uses seeded SYNTHETIC scenarios (regression guard, not a
+substitute for real-capture evaluation). Known trade-off: beacon detection
+needs 12 regular connections, so MTTD for a 60-120 s beacon is 12-24 minutes.
+New attack types beyond the five v1 families need a scope change in
+`Project.md` first (engine enum, playbooks and brain schema are pinned).
