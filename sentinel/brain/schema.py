@@ -14,7 +14,9 @@ is serialized through build_safe_input()/render_prompt().
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -84,6 +86,26 @@ class SafeInput:
         }
 
 
+_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+_CASE_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+
+def _clean_ip(value: Any) -> str:
+    """Packet-derived address fields must BE addresses, else they are dropped
+    (an attacker-influenced log field must not carry prose to the model)."""
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return ""
+
+
+def _clean_token(value: Any, default: str | None) -> str | None:
+    if value is None:
+        return default
+    text = str(value)
+    return text if _TOKEN.fullmatch(text) else default
+
+
 def _known_signals(signals: Iterable[str]) -> tuple[str, ...]:
     """Keep only enum members, preserving order, deduplicated."""
     seen: dict[str, None] = {}
@@ -124,14 +146,14 @@ def build_safe_input(
     }
 
     return SafeInput(
-        case_id=str(case_id),
-        src_ip=str(getattr(first, "src_ip", "")),
-        dst_ip=str(getattr(first, "dst_ip", "")),
+        case_id=(str(case_id) if _CASE_ID.fullmatch(str(case_id))
+                 else "invalid-case-id"),
+        src_ip=_clean_ip(getattr(first, "src_ip", "")),
+        dst_ip=_clean_ip(getattr(first, "dst_ip", "")),
         ports=ports,
-        protocol=str(getattr(first, "protocol", "")),
-        direction=direction,
-        vlan_tag=(None if getattr(first, "vlan", None) is None
-                  else str(first.vlan)),
+        protocol=_clean_token(getattr(first, "protocol", ""), "unknown") or "unknown",
+        direction=_clean_token(direction, None),
+        vlan_tag=_clean_token(getattr(first, "vlan", None), None),
         baseline_deviation_sigma=baseline_deviation_sigma,
         signal_types=_known_signals(
             s for a in alerts for s in getattr(a, "signals", ())),

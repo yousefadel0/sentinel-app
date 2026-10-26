@@ -218,3 +218,16 @@ substitute for real-capture evaluation). Known trade-off: beacon detection
 needs 12 regular connections, so MTTD for a 60-120 s beacon is 12-24 minutes.
 New attack types beyond the five v1 families need a scope change in
 `Project.md` first (engine enum, playbooks and brain schema are pinned).
+
+## LLM brain hardening (Phase 4)
+
+* Packet-derived fields sent to the model are validated (`src_ip`/`dst_ip`
+  must be IP addresses, `protocol`/`vlan_tag`/`direction` short tokens,
+  hostile `case_id` replaced); anything else is dropped, not forwarded.
+* `sentinel.brain.benchmark.run_benchmark` runs the same labeled cases
+  through several endpoints (one env var each) and reports schema-valid
+  rate, attack-type accuracy, playbook-safety rate, latency p50/p95 and
+  optional cost.
+* `sentinel run` triages ambiguous incidents (notify/human/escalate)
+  ADVISORILY when `brain.llm_endpoint_env` is set: rate-capped, off the
+  capture thread, recorded verbatim in `llm_pairs`, never altering a decision.

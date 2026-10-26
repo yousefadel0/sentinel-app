@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +41,71 @@ log = get_logger("sentinel.daemon")
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class AdvisoryTriage:
+    """Non-blocking, rate-capped LLM triage for ambiguous incidents.
+
+    ADVISORY ONLY: results are recorded as verbatim prompt/response pairs
+    (G7) and never change a decision. Calls run on one worker thread so the
+    hard-cutoff wait never stalls the capture loop; finished pairs are
+    drained and written by the loop thread (single SQLite writer).
+    """
+
+    def __init__(self, client, *, max_per_min: int = 6,
+                 max_pending: int = 4, clock=time.monotonic) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        self._client = client
+        self._max_per_min = max_per_min
+        self._max_pending = max_pending
+        self._clock = clock
+        self._pool = ThreadPoolExecutor(max_workers=1,
+                                        thread_name_prefix="triage")
+        self._pending: list = []
+        self._sent: deque = deque()
+        self.skipped = 0
+
+    def submit(self, case_id: str, alerts, first_seen: str | None) -> bool:
+        now = self._clock()
+        while self._sent and now - self._sent[0] > 60:
+            self._sent.popleft()
+        in_flight = sum(1 for f in self._pending if not f.done())
+        if len(self._sent) >= self._max_per_min or in_flight >= self._max_pending:
+            self.skipped += 1
+            return False
+        self._sent.append(now)
+        self._pending.append(self._pool.submit(
+            self._job, case_id, list(alerts), first_seen))
+        return True
+
+    def _job(self, case_id, alerts, first_seen):
+        from sentinel.brain.audit import InMemoryPairSink
+        from sentinel.brain.triage import triage_incident
+        sink = InMemoryPairSink()
+        triage_incident(case_id, alerts, self._client, sink=sink,
+                        first_seen=first_seen)
+        return sink.pairs
+
+    def drain(self) -> list:
+        pairs, keep = [], []
+        for f in self._pending:
+            if f.done():
+                try:
+                    pairs.extend(f.result())
+                except Exception:        # P4: never leak into the loop
+                    pass
+            else:
+                keep.append(f)
+        self._pending = keep
+        return pairs
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+#: Outcomes worth a second opinion (the "ambiguous ~10%" of Project.md §5).
+AMBIGUOUS_OUTCOMES = frozenset({"human_approval", "escalate_human",
+                                "notify_only"})
 
 
 class LockedEngine:
@@ -74,7 +141,9 @@ class Daemon:
                  clock: Callable[[], datetime] = _utcnow,
                  window_s: int = DEFAULT_CORRELATION_WINDOW_S,
                  health_path: Path | None = None,
-                 detectors: DetectorSuite | None = None) -> None:
+                 detectors: DetectorSuite | None = None,
+                 triage: AdvisoryTriage | None = None) -> None:
+        self._triage = triage
         self._detectors = detectors if detectors is not None else DetectorSuite()
         self._health_path = Path(health_path) if health_path else None
         self._sources = list(sources)
@@ -117,6 +186,11 @@ class Daemon:
             self._decide(inc)
             self._decided[key] = (sigs, n)
             made += 1
+        if self._triage is not None:
+            from sentinel.pilot.runner import StorePairSink
+            sink = StorePairSink(self._store)
+            for pair in self._triage.drain():
+                sink.append_pair(pair)
         self.cycles += 1
         self.decisions += made
         return made
@@ -153,6 +227,10 @@ class Daemon:
             recommendation=(asdict(rec) if rec is not None else {}),
             audit_events=[asdict(e) for e in decision.audit_events],
         )
+        if (self._triage is not None
+                and decision.outcome.value in AMBIGUOUS_OUTCOMES):
+            self._triage.submit(f"live-{decision.incident_id}",
+                                incident.alerts, incident.first_ts)
         log.info("live_decision", incident_id=decision.incident_id,
                  outcome=decision.outcome.value, score=float(decision.score))
 
@@ -213,5 +291,14 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                                  int(limits["max_blocks_per_hour"])),
         controller=AutonomyController(level=int(cfg["autonomy_level"])),
     ))
+    triage = None
+    brain = cfg.get("brain") or {}
+    env_var = brain.get("llm_endpoint_env")
+    if env_var and os.environ.get(env_var):
+        from sentinel.brain.client import LLMClient
+        triage = AdvisoryTriage(LLMClient(
+            env_var, timeout_s=int(brain["timeout_s"]),
+            hard_cutoff_s=int(brain["hard_cutoff_s"])))
     return Daemon(sources=sources, engine=engine, store=store,
-                  health_path=capture_dir / "live-health.json")
+                  health_path=capture_dir / "live-health.json",
+                  triage=triage)
