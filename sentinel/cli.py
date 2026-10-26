@@ -70,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
     ver.add_argument("--expect-head", metavar="HASH", default=None,
                      help="externally anchored chain head (detects truncation)")
 
+    rb = ctl_sub.add_parser(
+        "rollback", help="G3 one-command rollback of nftables enforcement")
+    rb.add_argument("--all", action="store_true", required=True,
+                    help="flush every Sentinel block/throttle/quarantine")
+    rb.add_argument("--table", default="sentinel",
+                    help="nft table name (default: sentinel)")
+
     intel = ctl_sub.add_parser("intel", help="read-only threat knowledge operations")
     intel_sub = intel.add_subparsers(dest="intel_command", required=True)
     sync = intel_sub.add_parser(
@@ -102,12 +109,19 @@ def _run_daemon(args) -> int:
         print("sentinel run requires `audit_store.path` in the config (ref §8/D5)",
               file=sys.stderr)
         return EXIT_FAIL
-    if not args.dry_run:
-        # The live loop is shadow-only until an actuation milestone ships.
-        log.warning("no_dry_run_ignored", reason="live daemon is shadow-only")
+    if not args.dry_run and int(cfg["autonomy_level"]) < 1:
+        print("REFUSING --no-dry-run: autonomy_level is 0 (shadow). Raise it "
+              "deliberately in the config once the evidence gate is met "
+              "(Project.md §6); nothing would be executed at L0 anyway.",
+              file=sys.stderr)
+        return EXIT_FAIL
     store = Store(store_cfg["path"], check_same_thread=not args.ui)
     daemon = build_daemon(cfg, Path(args.capture_dir), store,
-                          start_at_end=args.skip_history)
+                          start_at_end=args.skip_history,
+                          dry_run=args.dry_run)
+    if not args.dry_run:
+        log.warning("ENFORCEMENT_ENABLED", autonomy_level=cfg["autonomy_level"],
+                    note="actions will be executed through configured actuators")
     if args.ui:
         from sentinel.ui.app import create_app, serve  # optional extra
         try:
@@ -119,7 +133,8 @@ def _run_daemon(args) -> int:
         threading.Thread(
             target=serve, daemon=True, name="ops-ui",
             kwargs=dict(cfg=cfg, engine=daemon._engine, store=store,
-                        capture_dir=Path(args.capture_dir))).start()
+                        capture_dir=Path(args.capture_dir),
+                        on_resolved=daemon.execute_approved)).start()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
@@ -163,6 +178,12 @@ def main(argv: list[str] | None = None) -> int:
             store.close()
         print(_json.dumps(report, indent=2, sort_keys=True))
         return EXIT_OK if report["ok"] else EXIT_FAIL
+
+    if args.command == "ctl" and args.ctl_command == "rollback":
+        from sentinel.actuators import NftablesLocalActuator
+        res = NftablesLocalActuator(None, table=args.table).flush_all()
+        print(("OK: " if res.ok else "FAILED: ") + res.detail)
+        return EXIT_OK if res.ok else EXIT_FAIL
 
     if args.command == "ctl" and args.ctl_command == "intel":
         try:

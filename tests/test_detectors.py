@@ -125,3 +125,42 @@ def test_evaluation_gate_recall_and_zero_benign_fp():
         assert m["recall"] == 1.0, fam
         assert m["false_positives"] == 0, fam
     assert rep.benign_false_positives == 0
+
+
+def test_critical_asset_target_reaches_the_action_band(tmp_path):
+    """Regression for the 0.405 ceiling: configured critical assets must be
+    known to the engine, so a DDoS on one lands in human approval (>=0.70)
+    instead of log_only; the same flood on an ordinary host stays below."""
+    import yaml
+    from pathlib import Path
+    from sentinel.auditstore.store import Store
+    from sentinel.config.loader import load_config
+    from sentinel.daemon import build_daemon
+
+    cfg = yaml.safe_load(
+        (Path(__file__).parent / "fixtures/valid_config.yaml").read_text())
+    cfg["audit_store"] = {"path": str(tmp_path / "a.sqlite")}
+    cp = tmp_path / "c.yaml"
+    cp.write_text(yaml.safe_dump(cfg))
+    store = Store(tmp_path / "a.sqlite")
+    d = build_daemon(load_config(cp), tmp_path, store)
+    base = datetime.now(timezone.utc) - timedelta(seconds=40)
+    hdr = ("#fields\tts\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\n"
+           "#types\ttime\taddr\tport\taddr\tport\tstring\n")
+    rows = []
+    for victim in ("10.0.0.4", "10.0.9.9"):             # critical vs ordinary
+        for i in range(700):
+            t = (base + timedelta(seconds=i * 0.05)).timestamp()
+            rows.append(f"{t:.6f}\t192.0.2.{i % 80 + 1}\t4000\t{victim}\t443\ttcp\n")
+    (tmp_path / "conn.log").write_text(hdr + "".join(rows))
+    d.run_once()
+    by_dst = {}
+    for r in store.rows("incident_context"):
+        by_dst[r["dst_ip"]] = r["incident_id"]
+    outcome = {r["incident_id"]: (r["outcome"], r["score"])
+               for r in store.rows("decisions")}
+    crit = outcome[by_dst["10.0.0.4"]]
+    ordinary = outcome[by_dst["10.0.9.9"]]
+    assert crit[0] == "human_approval" and crit[1] >= 0.70
+    assert ordinary[0] == "log_only" and ordinary[1] < 0.70
+    store.close()

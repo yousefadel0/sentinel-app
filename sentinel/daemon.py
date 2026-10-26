@@ -29,13 +29,14 @@ from sentinel.capture.tail import OffsetStore
 from sentinel.contracts.datasource import DataSource
 from sentinel.correlator import Correlator
 from sentinel.correlator.correlator import DEFAULT_CORRELATION_WINDOW_S, _parse_ts
+from sentinel.actuation import Executor
 from sentinel.decision import AutonomyController, DecisionEngine, RateLimiter
 from sentinel.decision.chain import Facts
 from sentinel.detectors import DetectorSuite
 from sentinel.detectors.suite import is_incident_worthy
 from sentinel.logging_setup import get_logger
 from sentinel.models import Alert
-from sentinel.pilot.runner import _config_view
+from sentinel.pilot.runner import _config_view, asset_hints
 
 log = get_logger("sentinel.daemon")
 
@@ -146,7 +147,9 @@ class Daemon:
                  triage: AdvisoryTriage | None = None,
                  hub=None, exporter=None, approvals=None,
                  export_every_s: float = 10.0,
-                 metrics_path: Path | None = None) -> None:
+                 metrics_path: Path | None = None,
+                 executor: Executor | None = None) -> None:
+        self._executor = executor
         self._metrics_path = Path(metrics_path) if metrics_path else None
         self._hub, self._exporter = hub, exporter
         self._approvals = approvals
@@ -197,6 +200,8 @@ class Daemon:
             self._decided[key] = (sigs, n)
             made += 1
         self._apply_resolutions()
+        if self._executor is not None:
+            self._executor.sweep()
         self._export()
         if self._triage is not None:
             from sentinel.pilot.runner import StorePairSink
@@ -228,6 +233,10 @@ class Daemon:
         decision = self._engine.evaluate(incident, Facts(liveness="alive"))
         self._record(decision, "live")
         self._record_context(incident)
+        if self._executor is not None:
+            self._executor.handle(decision, {
+                "incident_id": decision.incident_id,
+                "src_ip": incident.src_ip, "dst_ip": incident.dst_ip}, "auto")
         if self._hub is not None:
             self._hub.notify(decision, incident)
         if (self._triage is not None
@@ -236,6 +245,26 @@ class Daemon:
                                 incident.alerts, incident.first_ts)
         log.info("live_decision", incident_id=decision.incident_id,
                  outcome=decision.outcome.value, score=float(decision.score))
+
+    def _enforce_approved(self, decision, case_id: str) -> None:
+        """A human said yes: hand the resolved decision to the executor."""
+        if self._executor is None:
+            return
+        rows = self._store.query(
+            "SELECT src_ip, dst_ip FROM incident_context WHERE incident_id = ?"
+            " ORDER BY id DESC LIMIT 1", (decision.incident_id,))
+        if not rows:
+            log.warning("approval_without_context",
+                        incident_id=decision.incident_id)
+            return
+        self._executor.handle(decision, {
+            "incident_id": decision.incident_id,
+            "src_ip": rows[0][0], "dst_ip": rows[0][1]}, "approved",
+            case_id=case_id)
+
+    def execute_approved(self, decision) -> None:
+        """Callback for the Ops UI approval route (same seam as chat)."""
+        self._enforce_approved(decision, "ops_ui")
 
     def _record_context(self, incident) -> None:
         """Persist who/what/where so the Ops UI can filter and explain."""
@@ -279,6 +308,7 @@ class Daemon:
             except KeyError:
                 continue                 # stale/unknown id: nothing to do
             self._record(decision, "telegram")
+            self._enforce_approved(decision, "telegram")
             log.info("chat_approval_resolved", approval_id=approval_id,
                      approved=approved)
 
@@ -330,6 +360,14 @@ class Daemon:
             gauge("sentinel_source_malformed_total",
                   h.get("malformed_lines_skipped"),
                   "Malformed input lines skipped", "counter", labels=lab)
+        if self._executor is not None:
+            gauge("sentinel_enforcement_dry_run",
+                  1 if self._executor.dry_run else 0,
+                  "1 = shadow/dry-run, 0 = enforcing")
+            gauge("sentinel_actions_executed_total", self._executor.executed,
+                  "Enforcement actions executed", "counter")
+            gauge("sentinel_actions_active", len(self._executor.active()),
+                  "Enforcement actions currently in force")
         if self._hub is not None:
             gauge("sentinel_notifications_delivered_total", self._hub.delivered,
                   "Notifications delivered", "counter")
@@ -359,8 +397,14 @@ class Daemon:
         """Atomically publish capture health for read-only consumers (Ops UI)."""
         if self._health_path is None:
             return
-        doc = {"mode": "live_shadow", "ts": self._clock().isoformat(),
+        ex = self._executor
+        doc = {"mode": ("live_enforcing" if ex and not ex.dry_run
+                        else "live_shadow"),
+               "ts": self._clock().isoformat(),
                "cycles": self.cycles, "decisions": self.decisions,
+               "enforcement": {"dry_run": True if ex is None else ex.dry_run,
+                               "executed": 0 if ex is None else ex.executed,
+                               "active": [] if ex is None else ex.active()},
                "sources": self.health()}
         try:
             tmp = self._health_path.with_suffix(".tmp")
@@ -389,24 +433,31 @@ class Daemon:
 
 def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                  state_path: Path | None = None,
-                 start_at_end: bool = False) -> Daemon:
+                 start_at_end: bool = False,
+                 dry_run: bool = True) -> Daemon:
     """Wire a shadow daemon from a validated config + a sensor log directory."""
     capture_dir = Path(capture_dir)
     state = OffsetStore(state_path or capture_dir / ".sentinel-offsets.json")
     sources: list[DataSource] = []
+    hints = asset_hints(cfg)
     eve = capture_dir / "eve.json"
-    sources.append(LiveEveDataSource(eve, state=state, start_at_end=start_at_end))
+    sources.append(LiveEveDataSource(eve, state=state, start_at_end=start_at_end,
+                                     critical_assets=hints))
     for name in ("conn.log", "dns.log", "ssl.log", "notice.log"):
         sources.append(LiveZeekDataSource(capture_dir / name, state=state,
-                                          start_at_end=start_at_end))
+                                          start_at_end=start_at_end,
+                                          critical_assets=hints))
     limits = cfg["limits"]
+    controller = AutonomyController(level=int(cfg["autonomy_level"]))
+    config_view = _config_view(cfg)
     engine = LockedEngine(DecisionEngine(
-        config_view=_config_view(cfg),
+        config_view=config_view,
         clock=_utcnow,
         rate_limiter=RateLimiter(int(limits["max_blocks_per_min"]),
                                  int(limits["max_blocks_per_hour"])),
-        controller=AutonomyController(level=int(cfg["autonomy_level"])),
+        controller=controller,
     ))
+    executor = _build_executor(cfg, config_view, store, controller, dry_run)
     hub, approvals = _build_notifiers(cfg)
     siem = cfg.get("siem") or {}
     exporter = None
@@ -436,7 +487,7 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
     return Daemon(sources=sources, engine=engine, store=store,
                   health_path=capture_dir / "live-health.json",
                   triage=triage, hub=hub, exporter=exporter,
-                  approvals=approvals,
+                  approvals=approvals, executor=executor,
                   metrics_path=capture_dir / "sentinel.prom")
 
 
@@ -455,3 +506,25 @@ def _build_notifiers(cfg: dict):
             if item.get("approvals") and approvals is None:
                 approvals = TelegramApprovals(item["url_env"], item["chat_id"])
     return (NotifierHub(senders) if senders else None), approvals
+
+
+def _build_executor(cfg: dict, config_view, store, controller,
+                    dry_run: bool) -> Executor:
+    """Executor over the actuators named in config. In dry-run (the default)
+    actuators are still constructed so intents and health are accurate, but
+    the executor never calls them."""
+    from sentinel.actuators import NftablesLocalActuator, WebhookSoarActuator
+    from sentinel.validator import Validator
+
+    validator = Validator(config_view)
+    actuators = {}
+    for item in cfg.get("actuators") or []:
+        if item["type"] == "nftables_local":
+            actuators["nftables_local"] = NftablesLocalActuator(validator)
+        elif item["type"] == "webhook_soar":
+            actuators["webhook_soar"] = WebhookSoarActuator(
+                validator, item["url"])
+    return Executor(
+        store=store, validator=validator, actuators=actuators,
+        autonomy_level=lambda: controller.level, dry_run=dry_run,
+        max_per_hour=int(cfg["limits"]["max_blocks_per_hour"]))

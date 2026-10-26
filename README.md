@@ -303,3 +303,49 @@ Settings are not editable from the UI on purpose.
 The daemon now records who/what/where per incident (`incident_context`:
 src/dst, signals, evidence `file#line` references, MITRE candidates). Incidents
 recorded before this version show no context.
+
+## Enforcement (mitigation) — off by default
+
+`sentinel run` is SHADOW by default. Acting on the network needs ALL of:
+`--no-dry-run`, `autonomy_level >= 1` in the config (the CLI refuses live mode
+at L0), a configured actuator, and a decision that reaches an enforceable
+outcome. Every decision then passes `sentinel.actuation.Executor`:
+
+| gate | rule |
+|---|---|
+| autonomy | auto outcomes need L2+, human-approved (UI / Telegram) need L1+ |
+| dry-run | default; records the intent in `actions` (verdict `dry_run`), executes nothing |
+| validator (G6) | §3.1 chain + engine verdict + G3 TTL <= 60 min |
+| hourly cap | `limits.max_blocks_per_hour`, also applies to approved actions |
+| actuator | must exist and be healthy, otherwise an honest `failed` / `no_actuator` row |
+
+Every branch writes an `actions` row (`executed`, `dry_run`, `withheld_autonomy`,
+`rejected_g6`, `rate_limited`, `no_actuator`, `failed`), hash-chained like the rest
+of the audit store. Approving from the Ops UI or Telegram runs the same executor.
+
+Actuators (`actuators:` in the config):
+* `webhook_soar` — DDoS playbook: asks the operator's SOAR/firewall to mitigate
+  upstream for the victim (Sentinel is SPAN-only; it never blocks that traffic
+  itself). Sends `Authorization: Bearer $SENTINEL_SOAR_TOKEN` when set.
+* `nftables_local` — block / throttle / quarantine via three timeout sets, enforced
+  in `input` and `forward` chains. Validated against real nftables 1.1 in a
+  privileged container (`tests/test_nft_real.py`). Expiry is done by the kernel;
+  `sentinel ctl rollback --all` flushes everything from any process.
+  On a SPAN-only sensor this only protects the sensor host itself.
+
+Run the real-nft tests where they can execute:
+
+```bash
+docker run --rm --cap-add NET_ADMIN -v "$PWD":/src <image with python + nftables> \
+  sh -c "cp -r /src /w && cd /w && pip install -q -e '.[dev]' && python -m pytest tests/test_nft_real.py -o addopts= -q"
+```
+
+### Known limit of the current scoring (decision needed)
+With the pinned formula `confidence x criticality x severity/5` and the 0.70 band,
+the best case per family (confidence 1.0) is: DDoS on a high/critical asset
+-> human approval / auto-act; brute force and C2 -> at most 0.68 (high) or 0.80
+(critical); scan and DNS tunneling -> never above 0.60. G1 also judges the
+VICTIM (`dst`), so brute force on a critical server escalates to a human instead
+of blocking the attacker. Net: today only the DDoS playbook can lead to an
+executed action; the others are alert/escalate-only. This is a guardrail and
+scoring policy choice, so it is deliberately unchanged here.

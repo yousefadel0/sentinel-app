@@ -168,6 +168,19 @@ def _config_view(cfg):
     )
 
 
+def asset_hints(cfg):
+    """ip -> AssetHint for the configured critical assets (Q3 mapping).
+
+    Without this the engine never learns that a target is important: every
+    endpoint defaulted to criticality "low" (weight 0.45), which capped a
+    worst-case DDoS at 0.45 and made the 0.70 action band unreachable.
+    """
+    from sentinel.models import AssetHint
+    return {str(a["ip"]): AssetHint(resolved_hostname=str(a["hostname"]),
+                                    asset_id=str(a["ip"]), criticality="high")
+            for a in cfg["site"]["critical_assets"]}
+
+
 def run_pilot(config_path, capture_dir, manifest_path=None, *,
               report_dir=None, attack_catalog_path="data/attack/enterprise-attack.json",
               enrich_vulnerabilities=False):
@@ -194,12 +207,15 @@ def run_pilot(config_path, capture_dir, manifest_path=None, *,
         nvd_cache = {}
 
         # -- ingest (same M1 file adapters as production replay) -------- #
+        hints = asset_hints(cfg)
         alerts = []
         for eve_file in sorted(capture_dir.glob("*.eve.jsonl")):
             alerts.extend(EveFileDataSource(
-                eve_file, signal_key="sentinel_signal").fetch())
+                eve_file, signal_key="sentinel_signal",
+                critical_assets=hints).fetch())
         for zeek_log in sorted(capture_dir.glob("conn.log")):
-            alerts.extend(ZeekLogFileDataSource(zeek_log).fetch())
+            alerts.extend(ZeekLogFileDataSource(
+                zeek_log, critical_assets=hints).fetch())
 
         clock = VirtualClock()
         engine = DecisionEngine(

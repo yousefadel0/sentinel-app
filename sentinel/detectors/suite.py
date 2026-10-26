@@ -287,9 +287,11 @@ class DetectorSuite:
     def _alert(signal, src, dst, count, threshold, members) -> Alert:
         last = max(members, key=lambda e: e.t)
         strength = min(1.0, max(0.0, count / threshold - 1.0))
+        # Criticality belongs to the alert's TARGET: only members that hit
+        # the emitted dst may lend their hint.
         hint = next((e.alert.asset_hint for e in members
-                     if e.alert.asset_hint and e.alert.asset_hint.criticality),
-                    AssetHint())
+                     if e.alert.dst_ip == dst and e.alert.asset_hint
+                     and e.alert.asset_hint.criticality), AssetHint())
         sample = last.alert
         return Alert(
             alert_id=str(uuid.uuid5(uuid.NAMESPACE_URL,

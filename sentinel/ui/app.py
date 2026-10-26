@@ -80,7 +80,8 @@ _SHELL = """<!doctype html>
 
 def create_app(cfg: dict, engine=None, store: Store | None = None,
                capture_dir: Path | None = None,
-               report_dir: Path | None = None) -> FastAPI:
+               report_dir: Path | None = None,
+               on_resolved=None) -> FastAPI:
     """Build the ops UI app from a VALIDATED config.
 
     Fail-closed rules enforced here at construction time:
@@ -105,6 +106,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     app.state.capture_dir = capture_dir
     app.state.report_dir = Path(report_dir or "reports")
     app.state.port = port
+    app.state.on_resolved = on_resolved
 
     static_dir = Path(__file__).parent / "static"
     # DP2: mount ONLY the vendored file directory; every file in it must
@@ -202,6 +204,11 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         )
         log.info("approval_resolved", approval_id=approval_id,
                  approved=approved)
+        if app.state.on_resolved is not None:
+            try:
+                app.state.on_resolved(decision)      # executor (same seam)
+            except Exception as exc:                 # never fail the approval
+                log.warning("on_resolved_failed", error=type(exc).__name__)
         if request.headers.get("HX-Request", "").lower() == "true":
             status = "اعتماد" if approved else "رفض"
             return HTMLResponse(f'<p class="empty-state">تم تسجيل {status} القرار.</p>')
@@ -423,11 +430,12 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
 
 def serve(cfg: dict, engine=None, store: Store | None = None,
           capture_dir: Path | None = None,
-          report_dir: Path | None = None) -> None:
+          report_dir: Path | None = None,
+          on_resolved=None) -> None:
     """Blocking uvicorn run bound to the validated loopback host:port."""
     import uvicorn
     ui_cfg = cfg["ops_ui"]
     host = ui_cfg["bind"].rsplit(":", 1)[0].strip("[]")
     app = create_app(cfg, engine=engine, store=store, capture_dir=capture_dir,
-                     report_dir=report_dir)
+                     report_dir=report_dir, on_resolved=on_resolved)
     uvicorn.run(app, host=host, port=app.state.port, log_level="warning")

@@ -110,13 +110,37 @@ class WebhookSoarActuator:
             return ActionResult(ok=False, actuator=self.name,
                                 detail=f"payload schema rejected: {exc}")
 
+        return self._post(payload)
+
+    # ------------------------------------------------------------------ #
+    def execute_upstream(self, *, action_name: str, target_ip: str,
+                         ttl_minutes: int, rationale: str,
+                         incident_id: str = "",
+                         audit_events: list[dict] | None = None) -> ActionResult:
+        """Ask the operator's SOAR/firewall to mitigate upstream (DDoS
+        playbook: Sentinel is SPAN-only, so it asks, it never blocks itself).
+        Same schema check, bounded retries and honest degradation as execute()."""
+        payload = {"incident_id": incident_id, "action": action_name,
+                   "target_ip": target_ip, "ttl_minutes": ttl_minutes,
+                   "rationale": rationale, "audit_events": audit_events or []}
+        try:
+            _validate_payload(payload)
+        except _PayloadError as exc:
+            return ActionResult(ok=False, actuator=self.name,
+                                detail=f"payload schema rejected: {exc}")
+        return self._post(payload)
+
+    def _post(self, payload: dict) -> ActionResult:
+        import os
         body = json.dumps(payload).encode()
         last_err = ""
         for attempt in range(MAX_ATTEMPTS):
-            req = urllib.request.Request(
-                self._url, data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST")
+            headers = {"Content-Type": "application/json"}
+            token = os.environ.get(self._token_env)
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(self._url, data=body,
+                                         headers=headers, method="POST")
             try:
                 with self._urlopen(req, timeout=self._timeout_s) as resp:
                     status = getattr(resp, "status", 200)
@@ -131,7 +155,7 @@ class WebhookSoarActuator:
             if attempt < MAX_ATTEMPTS - 1:
                 self._sleep(BACKOFF_SECONDS[min(attempt,
                                                len(BACKOFF_SECONDS) - 1)])
-        # Offline / exhausted budget ⇒ honest degrade to log_only, no crash.
+        # Offline / exhausted budget => honest degrade to log_only, no crash.
         return ActionResult(
             ok=False, actuator=self.name,
             detail=f"log_only degradation after {MAX_ATTEMPTS} attempts "
