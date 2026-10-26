@@ -1,0 +1,9 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	dns
+#fields	ts	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	qtype_name	query	answers	TTLs
+#types	time	addr	port	addr	port	string	string	string	vector[string]	vector[double]
+1697792401.500000	192.168.4.11	53011	10.0.0.5	53	udp	A	dc-01.corp.example	10.0.0.4	300.0
+1697792403.100000	192.168.4.11	53012	10.0.0.5	53	udp	TXT	c2.evil.example	-	-

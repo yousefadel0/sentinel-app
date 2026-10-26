@@ -1,0 +1,8 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	ssl
+#fields	ts	id.orig_h	id.orig_p	id.resp_h	id.resp_p	version	cipher	server_name	subject
+#types	time	addr	port	addr	port	string	string	string	string
+1697792402.700000	192.168.4.11	49152	198.51.100.23	443	TLSv13	0x1301	beacon.evil.example	CN=*.evil.example

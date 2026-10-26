@@ -23,10 +23,10 @@ htmlcov/
 .DS_Store
 
 # Runtime data / delivery bundles (never commit)
-capture/
-data/
-pilot_config.yaml
-reports/
+/capture/
+/data/
+/pilot_config.yaml
+/reports/
 *.zip
 *.sqlite
 *.sqlite3

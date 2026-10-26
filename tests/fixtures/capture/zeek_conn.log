@@ -1,0 +1,11 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	conn
+#fields	ts	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	service	duration	orig_bytes	resp_bytes	orig_pkts	resp_pkts
+#types	time	addr	port	addr	port	string	string	interval	count	count	count	count
+1697792401.123456	203.0.113.7	4443	192.168.4.11	22	tcp	ssh	42.500000	3072	128	48	2
+1697792402.654321	192.168.4.11	49152	198.51.100.23	443	tcp	ssl	120.000000	1024	20480	24	300
+this row has too few columns
+1697792404.000001	10.0.0.4	445	192.168.4.50	13990	tcp	-	5.000000	512	256	8	8

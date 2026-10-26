@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-20T08:00:01.123456+0000","event_type":"alert","src_ip":"203.0.113.7","src_port":4443,"dest_ip":"192.168.4.11","dest_port":22,"proto":"TCP","alert":{"signature_id":2001,"signature":"ET SCAN Suricata-portscan Nmap","severity":2,"confidence":0.92},"flow":{"pkts_toserver":48,"pkts_toclient":2,"bytes_toserver":3072,"bytes_toclient":128,"start":"2026-10-20T07:59:40.001+0000"}}
+{"timestamp":"2026-10-20T08:00:02.555+0000","event_type":"dns","src_ip":"192.168.4.11","src_port":53011,"dest_ip":"10.0.0.5","dest_port":53,"proto":"UDP","dns":{"type":"query","rrname":"dc-01.corp.example"},"packet_count":1,"bytes":90}
+{"this is not json
+{"timestamp":"2026-10-20T08:00:03.900+0000","event_type":"tls","src_ip":"192.168.4.11","src_port":49152,"dest_ip":"198.51.100.23","dest_port":443,"proto":"TCP","tls":{"sni":"beacon.evil.example","ja3":{"hash":"a1b2c3d4e5f6"}}}
+{"timestamp":"2026-10-20T08:00:04.200+0000","event_type":"flow","src_ip":"203.0.113.7","src_port":55001,"dest_ip":"192.168.4.11","dest_port":22,"proto":"TCP","flow":{"pkts_toserver":120,"pkts_toclient":60,"bytes_toserver":8192,"bytes_toclient":4096,"duration_seconds":42.5}}
