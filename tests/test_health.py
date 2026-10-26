@@ -21,7 +21,7 @@ def test_fresh_heartbeat_is_healthy_then_staleness_degrades():
     t = CaptureHealthTracker(interface="core_span", stale_after_seconds=0.05)
     t.record_heartbeat(ts=_iso(time.time()))
     assert t.snapshot().status == "healthy"
-    time.sleep(0.06)
+    time.sleep(0.3)  # >> stale window: Windows clock granularity is ~16 ms
     assert t.snapshot().status == "degraded"
 
 
@@ -59,7 +59,7 @@ def test_interfaces_are_independent_rollup_is_per_interface():
     a = CaptureHealthTracker(interface="edge_span", stale_after_seconds=0.05)
     b = CaptureHealthTracker(interface="core_span")
     a.record_heartbeat()
-    time.sleep(0.06)
+    time.sleep(0.3)  # >> stale window: Windows clock granularity is ~16 ms
     assert a.snapshot().status == "degraded"
     assert b.snapshot().status == "down"           # untouched interface unaffected
 

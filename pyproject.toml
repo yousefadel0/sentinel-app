@@ -35,6 +35,7 @@ include = ["sentinel*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["slow: end-to-end evaluation runs (tens of seconds)"]
 
 [tool.coverage.run]
 source = ["sentinel"]
