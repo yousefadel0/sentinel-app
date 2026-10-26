@@ -8,6 +8,9 @@ Route/auth matrix (P6 — single declared exception):
   POST /approvals/{id}/deny       token   → Engine.resolve(id, False)
   GET  /incidents/recent          token   recent decisions viewer
   GET  /kpis                      token   KPI counters (exact names, P5)
+  GET  /incidents/{id}            token   incident decision history (read-only)
+  GET  /audit/search              token   filtered decisions (read-only)
+  GET  /audit/export.csv          token   CSV export (read-only)
   GET  /static/htmx.min.js        NO AUTH — pure vendor file (DP2), zero
                                           operational data; named in
                                           DELIVERY-M7.md as THE exception.
@@ -67,6 +70,7 @@ _SHELL = """<!doctype html>
 <section class="section"><div class="section-head"><div><h2>الموافقات البشرية</h2><p>القرارات التي تحتاج مراجعة بشرية قبل اعتمادها</p></div><span class="refresh">تحديث تلقائي كل 5 ثوانٍ</span></div><div id="approvals" hx-get="/dashboard/approvals" hx-trigger="load, every 5s">جارٍ تحميل قائمة الموافقات…</div></section>
 <section class="section"><div class="section-head"><div><h2>تقرير آخر تشغيل</h2><p>تقرير مفصل للهجمات والأدلة وقرارات Sentinel وسياق ATT&CK</p></div></div><div id="report-link" hx-get="/dashboard/report" hx-trigger="load, every 30s">جارٍ البحث عن تقرير…</div></section>
 <section class="section"><div class="section-head"><div><h2>أحدث الحوادث والقرارات</h2><p>آخر 20 قرارًا، مع الدرجة وسبب القرار</p></div><span class="refresh">تحديث تلقائي كل 15 ثانية</span></div><div id="incidents" hx-get="/dashboard/incidents" hx-trigger="load, every 15s">جارٍ تحميل الحوادث…</div></section>
+<section class="section"><div class="section-head"><div><h2>تفاصيل الحادثة</h2><p>اختر حادثة من الجدول أعلاه</p></div></div><div id="incident-detail" class="empty-state">لم تُختر حادثة بعد.</div></section>
 </main><footer class="footer"><span>Sentinel · لوحة محلية للقراءة والمراجعة</span><span>السجل تراكمي؛ إعادة تشغيل الـPilot تضيف نتائج جديدة</span></footer></div></body></html>"""
 
 
@@ -219,6 +223,51 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         return Response(
             views.serialize(views.recent_incidents(app.state.store)),
             media_type="application/json")
+
+    # -- Phase 2: incident detail / audit search / export (read-only) ----- #
+    def _need_store() -> Store:
+        if app.state.store is None:
+            raise HTTPException(status_code=409, detail="no store attached")
+        return app.state.store
+
+    @app.get("/incidents/{incident_id}")
+    def incident_json(incident_id: str, request: Request) -> Response:
+        _guard(request)
+        detail = views.incident_detail(_need_store(), incident_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="unknown incident")
+        return Response(views.serialize(detail), media_type="application/json")
+
+    @app.get("/dashboard/incident/{incident_id}", response_class=HTMLResponse)
+    def dashboard_incident(incident_id: str, request: Request) -> HTMLResponse:
+        _guard(request)
+        return HTMLResponse(
+            views.render_incident_detail(app.state.store, incident_id))
+
+    @app.get("/audit/search")
+    def audit_search(request: Request, outcome: str | None = None,
+                     case_id: str | None = None, tier: str | None = None,
+                     q: str | None = None, min_score: float | None = None,
+                     limit: int = 100, offset: int = 0) -> Response:
+        _guard(request)
+        rows = views.audit_search(_need_store(), outcome=outcome,
+                                  case_id=case_id, tier=tier, q=q,
+                                  min_score=min_score, limit=limit,
+                                  offset=offset)
+        return Response(views.serialize(rows), media_type="application/json")
+
+    @app.get("/audit/export.csv")
+    def audit_export(request: Request, outcome: str | None = None,
+                     case_id: str | None = None, tier: str | None = None,
+                     q: str | None = None, min_score: float | None = None,
+                     limit: int = 1000) -> Response:
+        _guard(request)
+        rows = views.audit_search(_need_store(), outcome=outcome,
+                                  case_id=case_id, tier=tier, q=q,
+                                  min_score=min_score, limit=limit)
+        return Response(views.audit_csv(rows), media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=sentinel-audit.csv"})
 
     # -- KPI counters (read-only; exact names per P5) -------------------- #
     @app.get("/kpis")

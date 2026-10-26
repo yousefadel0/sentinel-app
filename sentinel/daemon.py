@@ -39,10 +39,35 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class LockedEngine:
+    """Serialises engine access between the daemon loop and the Ops UI thread.
+
+    DecisionEngine keeps mutable state (rate limiter, pending approvals); the
+    embedded UI resolves approvals from a worker thread while the daemon
+    evaluates new incidents. Every public call goes through one lock.
+    """
+
+    def __init__(self, engine: DecisionEngine) -> None:
+        self._engine = engine
+        self._lock = threading.RLock()
+
+    def evaluate(self, *a, **kw):
+        with self._lock:
+            return self._engine.evaluate(*a, **kw)
+
+    def resolve(self, *a, **kw):
+        with self._lock:
+            return self._engine.resolve(*a, **kw)
+
+    def pending_approvals(self):
+        with self._lock:
+            return dict(self._engine.pending_approvals())
+
+
 class Daemon:
     """One poll = ``run_once()``; ``run()`` loops until ``stop`` is set."""
 
-    def __init__(self, *, sources: Sequence[DataSource], engine: DecisionEngine,
+    def __init__(self, *, sources: Sequence[DataSource], engine: DecisionEngine | LockedEngine,
                  store: Store, correlator: Correlator | None = None,
                  clock: Callable[[], datetime] = _utcnow,
                  window_s: int = DEFAULT_CORRELATION_WINDOW_S,
@@ -171,12 +196,12 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
         sources.append(LiveZeekDataSource(capture_dir / name, state=state,
                                           start_at_end=start_at_end))
     limits = cfg["limits"]
-    engine = DecisionEngine(
+    engine = LockedEngine(DecisionEngine(
         config_view=_config_view(cfg),
         clock=_utcnow,
         rate_limiter=RateLimiter(int(limits["max_blocks_per_min"]),
                                  int(limits["max_blocks_per_hour"])),
         controller=AutonomyController(level=int(cfg["autonomy_level"])),
-    )
+    ))
     return Daemon(sources=sources, engine=engine, store=store,
                   health_path=capture_dir / "live-health.json")

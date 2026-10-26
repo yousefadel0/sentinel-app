@@ -192,3 +192,22 @@ def test_cli_run_refuses_without_audit_store(tmp_path, capsys):
     from sentinel.cli import main
     assert main(["--config", str(CFG), "run", "--capture-dir", str(tmp_path)]) == 1
     assert "audit_store.path" in capsys.readouterr().err
+
+
+def test_cli_run_ui_refused_when_ops_ui_disabled(tmp_path, capsys):
+    from sentinel.cli import main
+    cfg = yaml.safe_load(CFG.read_text())
+    cfg["audit_store"] = {"path": str(tmp_path / "a.sqlite")}
+    cp = tmp_path / "c.yaml"
+    cp.write_text(yaml.safe_dump(cfg))
+    assert main(["--config", str(cp), "run", "--ui",
+                 "--capture-dir", str(tmp_path)]) == 1
+    assert "ops_ui.enabled is false" in capsys.readouterr().err
+
+
+def test_locked_engine_delegates(tmp_path):
+    now = [datetime(2026, 10, 20, 8, 0, 0, tzinfo=timezone.utc)]
+    d, store = _daemon(tmp_path, now)
+    assert type(d._engine).__name__ == "LockedEngine"
+    assert d._engine.pending_approvals() == {}
+    store.close()

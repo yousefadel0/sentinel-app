@@ -13,7 +13,10 @@ no blended aggregate key is ever emitted.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
+import time
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -65,6 +68,33 @@ def pending_queue(engine: Any) -> list[dict[str, Any]]:
     return out
 
 
+LIVE_HEALTH_MAX_AGE_S = 30.0
+
+
+def _live_health(capture_dir: Path | None) -> list[dict[str, Any]] | None:
+    """Sources published by the live daemon (live-health.json), or None.
+
+    A stale file means the daemon itself stopped: every source is then
+    reported ``down`` rather than trusting its last words.
+    """
+    if capture_dir is None:
+        return None
+    path = Path(capture_dir) / "live-health.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - path.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    out = []
+    for src in doc.get("sources", []):
+        item = dict(src)
+        if age > LIVE_HEALTH_MAX_AGE_S:
+            item["status"] = "down"
+            item["daemon_stale"] = True
+        out.append(item)
+    return out
+
+
 def capture_health(capture_dir: Path | None) -> list[dict[str, Any]]:
     """Per-file replay capture health — REAL tracker semantics, zero writes.
 
@@ -73,6 +103,9 @@ def capture_health(capture_dir: Path | None) -> list[dict[str, Any]]:
     HealthSnapshot.to_dict(); missing dir/files report status=down
     honestly (never invented numbers).
     """
+    live = _live_health(capture_dir)
+    if live is not None:
+        return live
     if capture_dir is None or not Path(capture_dir).is_dir():
         return [{"file": str(capture_dir), "status": "down",
                  "heartbeat_ts": None, "packet_drops": None,
@@ -128,6 +161,15 @@ def _empty(message: str) -> str:
     return f'<p class="empty-state">{_e(message)}</p>'
 
 
+def _source_note(snap: dict[str, Any]) -> str:
+    if snap.get("source_type") == "live_file":
+        drops = snap.get("packet_drops")
+        drops_txt = "غير متاح" if drops is None else str(drops)
+        stale = " · الـ daemon متوقف" if snap.get("daemon_stale") else ""
+        return f"تتبّع مباشر لسجلات المستشعر (shadow) · فقد الحزم: {drops_txt}{stale}"
+    return "مصدر تجريبي من ملف · وليس التقاطًا مباشرًا من الشبكة"
+
+
 def render_capture(capture_dir: Path | None) -> str:
     if capture_dir is None:
         return _empty("لم يتم ربط مجلد capture بالواجهة.")
@@ -142,7 +184,7 @@ def render_capture(capture_dir: Path | None) -> str:
             '<article class="source-card">'
             f'<span class="status status-{_e(state)}">{_e(labels.get(state, state))}</span>'
             f'<strong>{_e(snap.get("file"))}</strong>'
-            '<span>مصدر تجريبي من ملف · وليس التقاطًا مباشرًا من الشبكة</span>'
+            f'<span>{_e(_source_note(snap))}</span>'
             f'<span>آخر تعديل: {_e(snap.get("heartbeat_ts"))}</span>'
             '</article>')
     return "".join(cards)
@@ -196,7 +238,9 @@ def render_incidents(store: Store | None) -> str:
         rows.append(
             '<tr>'
             f'<td>{_e(item.get("ts"))}</td>'
-            f'<td><code title="{iid}">{iid[:18]}…</code></td>'
+            f'<td><a href="#" hx-get="/dashboard/incident/{iid}" '
+            f'hx-target="#incident-detail" hx-swap="innerHTML">'
+            f'<code title="{iid}">{iid[:18]}…</code></a></td>'
             f'<td><span class="outcome outcome-{_e(outcome)}">'
             f'{_e(outcomes.get(outcome, outcome))}</span></td>'
             f'<td><span class="score"><span style="width:{score * 100:.1f}%"></span></span> '
@@ -253,3 +297,112 @@ def render_report_link(report_dir: str | Path) -> str:
     return ('<p>التقرير المفصل لآخر تشغيل جاهز.</p>'
             '<a class="button button-approve" href="/reports/latest" target="_blank" '
             'rel="noopener">فتح تقرير آخر تشغيل</a>')
+
+
+# -- Phase 2: incident detail, audit search, export (read-only) -------------- #
+
+_DECISION_COLS = ("id", "ts", "case_id", "incident_id", "outcome", "score",
+                  "base_score", "tier", "cap_applied", "would",
+                  "recommendation", "audit_events")
+
+
+def _decode(row: tuple) -> dict[str, Any]:
+    d = dict(zip(_DECISION_COLS, row))
+    for key in ("recommendation", "audit_events"):
+        try:
+            d[key] = json.loads(d[key])
+        except (TypeError, ValueError):
+            pass
+    return d
+
+
+def incident_detail(store: Store, incident_id: str) -> dict[str, Any] | None:
+    """Full decision history of one incident (oldest first) + LLM pairs."""
+    rows = store.query(
+        "SELECT " + ", ".join(_DECISION_COLS) +
+        " FROM decisions WHERE incident_id=? ORDER BY id ASC", (incident_id,))
+    if not rows:
+        return None
+    pairs = store.query(
+        "SELECT ts, case_id, status, elapsed_ms, digest FROM llm_pairs"
+        " WHERE case_id IN (?, ?) ORDER BY id ASC",
+        (incident_id, f"pilot-{incident_id}"))
+    return {
+        "incident_id": incident_id,
+        "decisions": [_decode(r) for r in rows],
+        "llm_pairs": [dict(zip(("ts", "case_id", "status", "elapsed_ms",
+                                "digest"), p)) for p in pairs],
+    }
+
+
+def audit_search(store: Store, *, outcome: str | None = None,
+                 case_id: str | None = None, tier: str | None = None,
+                 q: str | None = None, min_score: float | None = None,
+                 limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    """Filtered decisions listing — parametrised SELECT only."""
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    where, params = [], []
+    for col, val in (("outcome", outcome), ("case_id", case_id), ("tier", tier)):
+        if val:
+            where.append(f"{col} = ?")
+            params.append(val)
+    if q:
+        where.append("(incident_id LIKE ? OR would LIKE ?)")
+        like = "%" + q.replace("%", "").replace("_", "") + "%"
+        params += [like, like]
+    if min_score is not None:
+        where.append("score >= ?")
+        params.append(float(min_score))
+    sql = ("SELECT " + ", ".join(_DECISION_COLS[:10]) + " FROM decisions" +
+           (" WHERE " + " AND ".join(where) if where else "") +
+           " ORDER BY id DESC LIMIT ? OFFSET ?")
+    rows = store.query(sql, tuple(params) + (limit, offset))
+    return [dict(zip(_DECISION_COLS[:10], r)) for r in rows]
+
+
+def _csv_safe(value: Any) -> Any:
+    """Neutralise spreadsheet formula injection in exported text cells."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
+def audit_csv(rows: list[dict[str, Any]]) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    cols = _DECISION_COLS[:10]
+    w.writerow(cols)
+    for r in rows:
+        w.writerow([_csv_safe(r.get(c)) for c in cols])
+    return buf.getvalue()
+
+
+def render_incident_detail(store: Store | None, incident_id: str) -> str:
+    if store is None:
+        return _empty("لا يوجد سجل تدقيق مربوط بالواجهة.")
+    detail = incident_detail(store, incident_id)
+    if detail is None:
+        return _empty("لا توجد حادثة بهذا المعرّف.")
+    blocks = []
+    for d in detail["decisions"]:
+        events = d["audit_events"] if isinstance(d["audit_events"], list) else []
+        ev_html = "".join(
+            f'<li><code>{_e(e.get("name"))}</code> — {_e(e.get("detail"))}</li>'
+            for e in events if isinstance(e, dict)) or "<li>لا أحداث تدقيق</li>"
+        rec = d["recommendation"] if isinstance(d["recommendation"], dict) else {}
+        rec_html = _e(", ".join(f"{k}={v}" for k, v in sorted(rec.items()))) or "—"
+        blocks.append(
+            '<article class="source-card">'
+            f'<span class="status">{_e(d["outcome"])}</span>'
+            f'<strong>{_e(d["ts"])} · {_e(d["case_id"])}</strong>'
+            f'<span>الدرجة {float(d["score"]):.0%} (الأساس {float(d["base_score"]):.0%})'
+            f' · الفئة {_e(d["tier"])} · السقف: {_e(d["cap_applied"])}</span>'
+            f'<span>{_e(d["would"])}</span>'
+            f'<span>التوصية: {rec_html}</span>'
+            f'<ul>{ev_html}</ul></article>')
+    pairs = detail["llm_pairs"]
+    note = (f'<p class="subtle">عدد تفاعلات LLM المسجلة: {len(pairs)}</p>'
+            if pairs else "")
+    return (f'<h3><code>{_e(incident_id)}</code></h3>'
+            '<div class="source-grid">' + "".join(blocks) + "</div>" + note)

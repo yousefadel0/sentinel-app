@@ -57,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="directory with Suricata eve.json and Zeek *.log")
     run.add_argument("--poll-interval", type=float, default=1.0,
                      help="seconds between polls (default: 1)")
+    run.add_argument("--ui", action="store_true",
+                     help="also serve the loopback Ops UI (needs ops_ui.enabled)")
     run.add_argument("--skip-history", action="store_true",
                      help="on first start ignore lines already in the logs")
 
@@ -95,9 +97,21 @@ def _run_daemon(args) -> int:
     if not args.dry_run:
         # The live loop is shadow-only until an actuation milestone ships.
         log.warning("no_dry_run_ignored", reason="live daemon is shadow-only")
-    store = Store(store_cfg["path"])
+    store = Store(store_cfg["path"], check_same_thread=not args.ui)
     daemon = build_daemon(cfg, Path(args.capture_dir), store,
                           start_at_end=args.skip_history)
+    if args.ui:
+        from sentinel.ui.app import create_app, serve  # optional extra
+        try:
+            create_app(cfg)      # fail fast on disabled/unsafe UI config
+        except RuntimeError as exc:
+            store.close()
+            print(f"sentinel run --ui refused: {exc}", file=sys.stderr)
+            return EXIT_FAIL
+        threading.Thread(
+            target=serve, daemon=True, name="ops-ui",
+            kwargs=dict(cfg=cfg, engine=daemon._engine, store=store,
+                        capture_dir=Path(args.capture_dir))).start()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
