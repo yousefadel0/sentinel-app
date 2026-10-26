@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+
+# Tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor noise
+.vscode/
+
+# OS noise
+.DS_Store
+
+# Runtime data / delivery bundles (never commit)
+capture/
+data/
+pilot_config.yaml
+reports/
+*.zip
+*.sqlite
+*.sqlite3

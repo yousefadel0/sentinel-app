@@ -1,0 +1,7 @@
+# Operator-maintained seasonal calendar (fixture): July patch-window sees
+# double the normal scan volume — thresholds must phase in over 14 days.
+overrides:
+  - start_date: "2026-07-01"
+    end_date: "2026-07-31"
+    multipliers:
+      scan: 2.0

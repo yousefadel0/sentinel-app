@@ -1,0 +1,29 @@
+---
+# §8 config sketch verbatim (customer-A) — canonical valid fixture.
+site:
+  name: customer-A
+  critical_assets:
+    - {ip: "10.0.0.4", hostname: "dc-01"}
+    - {ip: "10.0.0.5", hostname: "dns-primary"}
+capture_interfaces:
+  - {name: edge_span, type: af_packet, iface: eth1}
+  - {name: core_span, type: af_packet, iface: eth2}
+placement:
+  primary_tap: core_switch
+  secondary_tap: internet_edge
+  asymmetric_risk: medium        # high|medium|low
+monitored_vlans: [prod, mgmt]
+unmapped_vlans:  [legacy_lab]
+has_nat: true
+brain: {llm_endpoint_env: SENTINEL_LLM_API, timeout_s: 8, hard_cutoff_s: 5}
+actuators:
+  - type: nftables_local
+  - type: webhook_soar
+    url: https://soar.local/hooks/sentinel
+autonomy_level: 0          # ALWAYS start shadow
+limits: {max_blocks_per_min: 5, max_blocks_per_hour: 20, default_ttl_min: 30}
+ops_ui:                    # M7 module (optional)
+  enabled: false            # never on by default
+  bind: "127.0.0.1:8080"   # local/mgmt ONLY — never expose to routable nets
+  auth_token_env: SENTINEL_OPS_UI_TOKEN
+  allowed_ports: [8080, 8081]  # operator policy: WHICH ports; loopback-only host is a hard invariant

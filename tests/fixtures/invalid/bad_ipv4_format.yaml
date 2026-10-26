@@ -1,0 +1,18 @@
+site:
+  name: customer-A
+  critical_assets:
+    - {ip: "10.0.0.999", hostname: "dc-01"}
+capture_interfaces:
+  - {name: core_span, type: af_packet, iface: eth2}
+placement:
+  primary_tap: core_switch
+  secondary_tap: internet_edge
+  asymmetric_risk: medium
+monitored_vlans: [prod]
+unmapped_vlans: []
+has_nat: true
+brain: {llm_endpoint_env: SENTINEL_LLM_API, timeout_s: 8, hard_cutoff_s: 5}
+actuators:
+  - type: nftables_local
+autonomy_level: 0
+limits: {max_blocks_per_min: 5, max_blocks_per_hour: 20, default_ttl_min: 30}
