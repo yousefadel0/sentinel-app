@@ -282,3 +282,24 @@ actuator that talks to a production firewall is not something to ship.
 
 Not included: Helm chart / OVA / HA pair — they need target infrastructure to
 validate and are deliberately not shipped untested.
+
+## Ops UI v2 (dashboard + analyst control)
+
+Six tabs — **Overview** (KPIs, decisions over time, top sources/targets, attack
+types, autonomy-readiness gate), **Incidents** (filter by outcome/tier/type/IP/
+text/score/analyst verdict, paging, CSV export, side-panel with the full
+decision timeline, evidence references and MITRE candidates), **Approvals**
+(pending queue with source/target, history), **Sources** (live sensor health),
+**Audit** (search + one-click hash-chain verification) and **Settings**
+(read-only, secrets reduced to "is the env var set").
+
+Control is deliberately narrow: the only writes are (1) approve/deny through
+`Engine.resolve` (unchanged) and (2) analyst verdicts/notes
+(`POST /incidents/{id}/annotate`), appended to the hash-chained audit store.
+Verdicts never reach the engine, so they cannot change or trigger an action;
+they do feed the analyst false-positive rate that gates any autonomy upgrade.
+Settings are not editable from the UI on purpose.
+
+The daemon now records who/what/where per incident (`incident_context`:
+src/dst, signals, evidence `file#line` references, MITRE candidates). Incidents
+recorded before this version show no context.

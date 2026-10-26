@@ -11,6 +11,8 @@ Route/auth matrix (P6 — single declared exception):
   GET  /incidents/{id}            token   incident decision history (read-only)
   GET  /audit/search              token   filtered decisions (read-only)
   GET  /audit/export.csv          token   CSV export (read-only)
+  GET  /ui/*                      token   v2 dashboard fragments (read-only)
+  POST /incidents/{id}/annotate   token   analyst label/note -> audit store ONLY
   GET  /static/htmx.min.js        NO AUTH — pure vendor file (DP2), zero
                                           operational data; named in
                                           DELIVERY-M7.md as THE exception.
@@ -24,6 +26,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -32,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from sentinel.auditstore.store import Store
 from sentinel.logging_setup import get_logger
 from sentinel.ui.auth import TokenAuth
-from sentinel.ui import views
+from sentinel.ui import analytics, pages, views
 
 log = get_logger("sentinel.ui")
 
@@ -115,7 +118,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         _guard(request)
-        return HTMLResponse(_SHELL)
+        return HTMLResponse(pages.shell())
 
     # Human-readable fragments are separate from the stable JSON API below.
     @app.get("/dashboard/health", response_class=HTMLResponse)
@@ -269,6 +272,141 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         return Response(views.audit_csv(rows), media_type="text/csv",
                         headers={"Content-Disposition":
                                  "attachment; filename=sentinel-audit.csv"})
+
+    # -- Ops UI v2 pages (fragments; all token-guarded, read-only) --------- #
+    def _page(html: str) -> HTMLResponse:
+        return HTMLResponse(html)
+
+    def _store_or_note() -> Optional[Store]:
+        return app.state.store
+
+    @app.get("/ui/mode", response_class=HTMLResponse)
+    def ui_mode(request: Request) -> HTMLResponse:
+        _guard(request)
+        live = views._live_health(app.state.capture_dir)
+        fresh = bool(live) and not any(s.get("daemon_stale") for s in live)
+        return _page(pages.mode_badge({"live": live is not None,
+                                       "daemon_fresh": fresh}))
+
+    @app.get("/ui/overview", response_class=HTMLResponse)
+    def ui_overview(request: Request) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        ov = analytics.overview(store)
+        level = int((cfg.get("autonomy_level", 0)) or 0)
+        return _page(pages.overview(
+            ov, analytics.autonomy_readiness(ov, level), views.kpis(store),
+            len(views.pending_queue(app.state.engine))))
+
+    @app.get("/ui/incidents", response_class=HTMLResponse)
+    def ui_incidents(request: Request, outcome: str = "", tier: str = "",
+                     attack_type: str = "", ip: str = "", q: str = "",
+                     label: str = "", min_score: str = "",
+                     page: int = 1) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        try:
+            ms = float(min_score) if min_score.strip() else None
+        except ValueError:
+            ms = None
+        f = {"outcome": outcome, "tier": tier, "attack_type": attack_type,
+             "ip": ip.strip(), "q": q.strip(), "label": label,
+             "min_score": min_score.strip()}
+        listing = analytics.incident_list(
+            store, outcome=outcome, tier=tier, attack_type=attack_type,
+            ip=f["ip"], q=f["q"], label=label, min_score=ms, page=page)
+        return _page(pages.incidents(listing, f))
+
+    @app.get("/ui/incident/{incident_id}", response_class=HTMLResponse)
+    def ui_incident(incident_id: str, request: Request) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        full = analytics.incident_full(store, incident_id)
+        if full is None:
+            return _page(pages.empty("لا توجد حادثة بهذا المعرّف."))
+        return _page(pages.incident_detail(full, True))
+
+    @app.post("/incidents/{incident_id}/annotate", response_class=HTMLResponse)
+    async def annotate(incident_id: str, request: Request) -> HTMLResponse:
+        """Analyst verdict/note — appended to the audit store ONLY. It never
+        reaches the engine, so it cannot change or trigger any action."""
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            raise HTTPException(status_code=409, detail="no store attached")
+        if analytics.incident_full(store, incident_id) is None:
+            raise HTTPException(status_code=404, detail="unknown incident")
+        raw = (await request.body())[:8192].decode("utf-8", "replace")
+        form = {k: v[0] for k, v in parse_qs(raw).items()}
+        label, note = form.get("label", ""), form.get("note", "").strip()
+        if label not in ("",) + analytics.LABELS:
+            raise HTTPException(status_code=422, detail="invalid label")
+        if not label and not note:
+            raise HTTPException(status_code=422, detail="empty annotation")
+        store.record_analyst_note(incident_id=incident_id, actor="ops_ui",
+                                  label=label, note=note)
+        log.info("analyst_annotation", incident_id=incident_id, label=label)
+        return _page(pages.incident_detail(
+            analytics.incident_full(store, incident_id), True))
+
+    @app.get("/ui/approvals", response_class=HTMLResponse)
+    def ui_approvals(request: Request) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        pending = views.pending_queue(app.state.engine)
+        history = []
+        if store is not None:
+            for p in pending:
+                row = store.query(
+                    "SELECT src_ip, dst_ip, attack_type FROM incident_context"
+                    " WHERE incident_id = ? ORDER BY id DESC LIMIT 1",
+                    (p["approval_id"],))
+                if row:
+                    p["src_ip"], p["dst_ip"], p["attack_type"] = row[0]
+            history = [dict(zip(("ts", "incident_id", "outcome", "case_id"), r))
+                       for r in store.query(
+                           "SELECT ts, incident_id, outcome, case_id FROM decisions"
+                           " WHERE case_id IN ('ops_ui','telegram')"
+                           " ORDER BY id DESC LIMIT 25")]
+        return _page(pages.approvals(pending, history,
+                                     app.state.engine is not None))
+
+    @app.get("/ui/sources", response_class=HTMLResponse)
+    def ui_sources(request: Request) -> HTMLResponse:
+        _guard(request)
+        return _page(pages.sources(views.capture_health(app.state.capture_dir)))
+
+    @app.get("/ui/audit", response_class=HTMLResponse)
+    def ui_audit(request: Request, outcome: str = "", case_id: str = "",
+                 q: str = "") -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        rows = views.audit_search(store, outcome=outcome or None,
+                                  case_id=case_id or None, q=q or None,
+                                  limit=100)
+        return _page(pages.audit(rows, {"outcome": outcome,
+                                        "case_id": case_id, "q": q}))
+
+    @app.get("/ui/audit/verify", response_class=HTMLResponse)
+    def ui_audit_verify(request: Request) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        return _page(pages.chain_report(store.verify_chain()))
+
+    @app.get("/ui/settings", response_class=HTMLResponse)
+    def ui_settings(request: Request) -> HTMLResponse:
+        _guard(request)
+        return _page(pages.settings(views.settings_view(cfg)))
 
     # -- KPI counters (read-only; exact names per P5) -------------------- #
     @app.get("/kpis")

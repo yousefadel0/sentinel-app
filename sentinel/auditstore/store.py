@@ -72,6 +72,28 @@ CREATE TABLE IF NOT EXISTS rollbacks (
     ok       INTEGER NOT NULL,
     detail   TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS incident_context (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    src_ip      TEXT NOT NULL,
+    dst_ip      TEXT NOT NULL,
+    attack_type TEXT NOT NULL DEFAULT '',
+    signals     TEXT NOT NULL DEFAULT '[]',
+    alert_count INTEGER NOT NULL DEFAULT 0,
+    first_ts    TEXT NOT NULL DEFAULT '',
+    last_ts     TEXT NOT NULL DEFAULT '',
+    evidence    TEXT NOT NULL DEFAULT '[]',
+    mitre       TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS analyst_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS audit_chain (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,
@@ -93,11 +115,13 @@ CREATE TABLE IF NOT EXISTS kpis_events (
 #: SQLite layer on every audit table — immutability is enforced by the
 #: store file itself, not by caller discipline.
 _IMMUTABLE_TABLES = ("meta", "decisions", "llm_pairs", "actions",
-                     "rollbacks", "kpis_events", "audit_chain")
+                     "rollbacks", "kpis_events", "incident_context",
+                     "analyst_notes", "audit_chain")
 
 #: Tables whose rows are covered by the tamper-evidence hash chain.
 _CHAINED_TABLES = ("meta", "decisions", "llm_pairs", "actions",
-                   "rollbacks", "kpis_events")
+                   "rollbacks", "kpis_events", "incident_context",
+                   "analyst_notes")
 GENESIS_HASH = "0" * 64
 
 
@@ -214,6 +238,35 @@ class Store:
             " VALUES (?,?,?,?,?)",
             (_utc_now_iso(), case_id, name, value, detail))
         return self._commit_chained("kpis_events", int(cur.lastrowid))
+
+    def record_incident_context(self, *, incident_id: str, src_ip: str,
+                                dst_ip: str, attack_type: str,
+                                signals: list[str], alert_count: int,
+                                first_ts: str, last_ts: str,
+                                evidence: list[str],
+                                mitre: list[str]) -> int:
+        """Who/what/where of an incident (evidence is REFERENCES only —
+        file#line locators, never raw payloads)."""
+        cur = self._conn.execute(
+            "INSERT INTO incident_context (ts, incident_id, src_ip, dst_ip,"
+            " attack_type, signals, alert_count, first_ts, last_ts, evidence,"
+            " mitre) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (_utc_now_iso(), incident_id, src_ip, dst_ip, attack_type,
+             json.dumps(signals), alert_count, first_ts, last_ts,
+             json.dumps(evidence[:50]), json.dumps(mitre)))
+        return self._commit_chained("incident_context", int(cur.lastrowid))
+
+    def record_analyst_note(self, *, incident_id: str, actor: str,
+                            label: str = "", note: str = "") -> int:
+        """Analyst feedback. ``label`` in {"", true_positive, false_positive,
+        benign}; the LATEST row per incident is its current verdict."""
+        if label not in ("", "true_positive", "false_positive", "benign"):
+            raise ValueError(f"invalid label: {label!r}")
+        cur = self._conn.execute(
+            "INSERT INTO analyst_notes (ts, incident_id, actor, label, note)"
+            " VALUES (?,?,?,?,?)",
+            (_utc_now_iso(), incident_id, actor, label, note[:2000]))
+        return self._commit_chained("analyst_notes", int(cur.lastrowid))
 
     # -- tamper evidence (hash chain) ----------------------------------- #
 

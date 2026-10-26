@@ -406,3 +406,47 @@ def render_incident_detail(store: Store | None, incident_id: str) -> str:
             if pairs else "")
     return (f'<h3><code>{_e(incident_id)}</code></h3>'
             '<div class="source-grid">' + "".join(blocks) + "</div>" + note)
+
+
+def settings_view(cfg: dict) -> dict[str, Any]:
+    """Redacted effective config for the read-only settings page.
+
+    Secrets never live in the config (only the NAMES of environment
+    variables), and even those are reduced to "is it set" here.
+    """
+    import os
+    env_names = []
+    brain = cfg.get("brain") or {}
+    if brain.get("llm_endpoint_env"):
+        env_names.append(brain["llm_endpoint_env"])
+    if (cfg.get("ops_ui") or {}).get("auth_token_env"):
+        env_names.append(cfg["ops_ui"]["auth_token_env"])
+    notifiers = cfg.get("notifiers") or []
+    for n in notifiers:
+        env_names.append(n.get("url_env", ""))
+    siem = cfg.get("siem") or {}
+    for part in ("inbound", "outbound"):
+        tok = (siem.get(part) or {}).get("token_env")
+        if tok and (siem.get(part) or {}).get("enabled"):
+            env_names.append(tok)
+    siem_txt = "معطّل"
+    if siem.get("enabled"):
+        parts = [p for p in ("inbound", "outbound")
+                 if (siem.get(p) or {}).get("enabled")]
+        siem_txt = "مفعّل: " + ", ".join(parts) if parts else "مفعّل بلا اتجاهات"
+    limits = cfg.get("limits") or {}
+    return {
+        "autonomy_level": int(cfg.get("autonomy_level", 0) or 0),
+        "limits": {"max_blocks_per_min": limits.get("max_blocks_per_min", "—"),
+                   "max_blocks_per_hour": limits.get("max_blocks_per_hour", "—"),
+                   "default_ttl_min": limits.get("default_ttl_min", "—")},
+        "site": (cfg.get("site") or {}).get("name", "—"),
+        "critical_assets": [
+            {"ip": a.get("ip", ""), "hostname": a.get("hostname", "")}
+            for a in (cfg.get("site") or {}).get("critical_assets", [])],
+        "monitored_vlans": [str(x) for x in cfg.get("monitored_vlans", [])],
+        "asymmetric_risk": (cfg.get("placement") or {}).get("asymmetric_risk", "—"),
+        "env": [(n, bool(os.environ.get(n))) for n in env_names if n],
+        "notifiers": [n.get("type", "?") for n in notifiers],
+        "siem": siem_txt,
+    }

@@ -227,6 +227,7 @@ class Daemon:
         # the pilot and keeps the daemon shadow-only (nothing executes).
         decision = self._engine.evaluate(incident, Facts(liveness="alive"))
         self._record(decision, "live")
+        self._record_context(incident)
         if self._hub is not None:
             self._hub.notify(decision, incident)
         if (self._triage is not None
@@ -235,6 +236,20 @@ class Daemon:
                                 incident.alerts, incident.first_ts)
         log.info("live_decision", incident_id=decision.incident_id,
                  outcome=decision.outcome.value, score=float(decision.score))
+
+    def _record_context(self, incident) -> None:
+        """Persist who/what/where so the Ops UI can filter and explain."""
+        from sentinel.threatintel.attack import map_incident
+        mapping = map_incident(incident.signals)
+        self._store.record_incident_context(
+            incident_id=incident.incident_id,
+            src_ip=incident.src_ip, dst_ip=incident.dst_ip,
+            attack_type=(mapping.attack_type if mapping else ""),
+            signals=list(incident.signals),
+            alert_count=len(incident.alerts),
+            first_ts=incident.first_ts, last_ts=incident.last_ts,
+            evidence=[a.source.ref for a in incident.alerts[:50]],
+            mitre=list(mapping.technique_ids) if mapping else [])
 
     def _record(self, decision, case_id: str) -> None:
         rec = decision.recommendation
