@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Sentinel — وثيقة المعمارية التقنية</title>
+<style>
+@page { size: A4; margin: 14mm 14mm 17mm 14mm;
+  @bottom-center { content: counter(page); font: 9pt "Segoe UI", Tahoma, sans-serif; color: #6b7a90; }
+  @bottom-left { content: "Sentinel · Architecture"; font: 8pt "Segoe UI", sans-serif; color: #9aa7b8; }
+}
+@page :first { margin: 0; @bottom-center { content: none } @bottom-left { content: none } }
+:root { --navy:#0f2742; --teal:#0f766e; --blue:#1d6fa5; --coral:#c2492a; --ink:#1c2b3d; --mute:#5b6b80; --line:#d5dde8; --soft:#f3f6fa; }
+* { box-sizing: border-box; }
+html { font-family: "Segoe UI", Tahoma, "Arial", sans-serif; color: var(--ink); font-size: 9.9pt; line-height: 1.6; }
+body { margin: 0; }
+.page { page-break-after: always; }
+.page:last-child { page-break-after: auto; }
+code, .ltr { direction: ltr; unicode-bidi: isolate; font-family: Consolas, "Courier New", monospace; font-size: 9.3pt; }
+code { background: #eef2f7; border: 1px solid #e0e6ee; padding: 0 5px; border-radius: 4px; }
+pre { direction: ltr; text-align: left; background: #0f2742; color: #e6eef8; padding: 8px 12px; border-radius: 8px; font: 8.6pt/1.5 Consolas, monospace; margin: 6px 0 8px; white-space: pre-wrap; }
+
+/* cover */
+.cover { height: 297mm; background: var(--navy); color: #fff; padding: 34mm 24mm 24mm; position: relative; page-break-after: always; overflow: hidden; }
+.cover .bar { position: absolute; inset-inline-start: 0; top: 0; bottom: 0; width: 9mm; background: var(--teal); }
+.cover .mark { width: 22mm; height: 22mm; border-radius: 6mm; background: var(--teal); display: flex; align-items: center; justify-content: center; font-size: 30pt; font-weight: 700; margin-bottom: 14mm; }
+.cover h1 { font-size: 46pt; margin: 0; letter-spacing: .5pt; }
+.cover .sub { font-size: 19pt; color: #b9cde3; margin: 3mm 0 0; font-weight: 400; }
+.cover .rule { height: 2px; width: 44mm; background: var(--teal); margin: 14mm 0; }
+.cover .tag { font-size: 12.5pt; color: #d7e4f1; max-width: 140mm; line-height: 1.9; }
+.cover .meta { position: absolute; bottom: 24mm; inset-inline-start: 24mm; inset-inline-end: 24mm; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10mm; border-top: 1px solid #2d4a6b; padding-top: 7mm; font-size: 10pt; color: #b9cde3; }
+.cover .meta b { display: block; color: #fff; font-size: 11.5pt; font-weight: 600; margin-top: 1mm; }
+
+/* headings */
+h2 { font-size: 18pt; color: var(--navy); margin: 0 0 2.5mm; padding-bottom: 2mm; border-bottom: 3px solid var(--teal); display: flex; align-items: baseline; gap: 10px; }
+h2 .n { color: var(--teal); font-size: 14pt; font-weight: 700; }
+h3 { font-size: 12pt; color: var(--blue); margin: 4.5mm 0 1.5mm; }
+p { margin: 0 0 2mm; }
+.lead { font-size: 10.8pt; color: #33465d; }
+
+/* components */
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 3mm; margin: 3mm 0; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 2.6mm 4mm; background: #fff; break-inside: avoid; }
+.card b { color: var(--navy); font-size: 11pt; }
+.card p { margin: .6mm 0 0; font-size: 9.4pt; color: #33465d; }
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3mm; margin: 3mm 0 3mm; }
+.kpi { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 2mm 3mm; text-align: center; }
+.kpi .v { font-size: 20pt; font-weight: 700; color: var(--teal); line-height: 1.2; }
+.kpi .l { font-size: 8.8pt; color: var(--mute); }
+
+table { width: 100%; border-collapse: collapse; margin: 2mm 0 3.5mm; font-size: 9.1pt; break-inside: auto; }
+th { background: var(--navy); color: #fff; font-weight: 600; text-align: start; padding: 1.6mm 2.6mm; font-size: 9pt; }
+td { padding: 1.5mm 2.6mm; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:nth-child(even) td { background: #f8fafc; }
+tr { break-inside: avoid; }
+td.k { font-weight: 600; color: var(--navy); white-space: nowrap; }
+.pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 8.8pt; font-weight: 600; border: 1px solid; white-space: nowrap; }
+.ok { color: #0f6b3a; background: #e8f6ee; border-color: #b5dcc4; }
+.no { color: #8a3a12; background: #fdf0e6; border-color: #f0c9aa; }
+.wr { color: #7a5a00; background: #fff6dc; border-color: #ecd791; }
+.note { border-inline-start: 4px solid var(--teal); background: #eef8f6; padding: 2mm 3.5mm; border-radius: 4px; margin: 2.5mm 0; font-size: 9.4pt; }
+.warn { border-inline-start: 4px solid var(--coral); background: #fdf1ec; padding: 2mm 3.5mm; border-radius: 4px; margin: 2.5mm 0; font-size: 9.4pt; }
+.fig { margin: 2mm 0 3mm; border: 1px solid var(--line); border-radius: 10px; padding: 3mm; background: #fff; }
+.fig svg { width: 100%; height: auto; display: block; }
+.legend { display: flex; gap: 6mm; font-size: 9.4pt; color: var(--mute); margin-top: 2mm; }
+.legend i { display: inline-block; width: 3mm; height: 3mm; border-radius: 2px; margin-inline-end: 2mm; vertical-align: -0.3mm; }
+ol.steps { padding-inline-start: 6mm; margin: 1.5mm 0 3mm; }
+ol.steps li { margin-bottom: 1mm; }
+.tight td { padding: 1mm 2.4mm; } .tight th { padding: 1.2mm 2.4mm; } .tight h3 { margin: 3mm 0 1mm; } .tight table { margin: 1.5mm 0 2.5mm; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; }
+.toc { list-style: none; padding: 0; margin: 2mm 0; }
+.toc li { display: flex; gap: 3mm; padding: 1mm 0; border-bottom: 1px dotted var(--line); }
+.toc .n { color: var(--teal); font-weight: 700; width: 8mm; }
+</style>
+</head>
+<body>
+
+<!-- ====================== COVER ====================== -->
+<div class="cover">
+  <div class="bar"></div>
+  <div class="mark">S</div>
+  <h1>Sentinel</h1>
+  <p class="sub">وثيقة المعمارية التقنية</p>
+  <div class="rule"></div>
+  <p class="tag">جهاز دفاع شبكي ذاتي يعمل كبرمجية: يلتقط الترافيك عبر SPAN، يكتشف الهجمات، ويقرر بمحرك حتمي مع مساعدة نموذج لغوي محدود الدور، وينفّذ الحماية داخل حدود أمان صارمة مع سجل تدقيق كامل.</p>
+  <div class="meta">
+    <div>الإصدار<b>0.1.0 · commit ff164c8</b></div>
+    <div>التاريخ<b>26 أكتوبر 2026</b></div>
+    <div>البيئات المدعومة<b>Python 3.9 – 3.14 · Windows / Linux</b></div>
+  </div>
+</div>
+
+<!-- ====================== 1. OVERVIEW ====================== -->
+<section class="page">
+<h2><span class="n">01</span> نظرة عامة</h2>
+<p class="lead">Sentinel برنامج يُنشر كـ Docker أو بيئة Python، ويستقبل سجلات حساسات الشبكة (Suricata وZeek) وتنبيهات الهوية (Wazuh)، ويحوّلها إلى حوادث وقرارات قابلة للتدقيق، ويستطيع اختياريًا تنفيذ إجراءات حماية مؤقتة عبر أدوات قائمة.</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="v">5</div><div class="l">عائلات هجوم مغطّاة</div></div>
+  <div class="kpi"><div class="v">L0–L3</div><div class="l">سلّم الاستقلالية</div></div>
+  <div class="kpi"><div class="v">60</div><div class="l">أقصى مدة لأي إجراء (دقيقة)</div></div>
+  <div class="kpi"><div class="v">491</div><div class="l">اختبار آلي (Linux)</div></div>
+</div>
+
+<h3>المبادئ الستة التي يقوم عليها التصميم</h3>
+<div class="cards">
+  <div class="card"><b>P1 · قابل للنقل</b><p>لا عناوين ولا أسرار مكتوبة في الكود؛ كل بيئة تصف نفسها في ملف إعدادات صارم يُرفض عند أي خطأ.</p></div>
+  <div class="card"><b>P2 · محوّلات (Adapters)</b><p>كل تكامل يطبّق واجهة موحّدة (DataSource / Actuator)، فلا يعرف القلب تفاصيل أي مورّد.</p></div>
+  <div class="card"><b>P3 · السلك هو المرجع</b><p>الرؤية الأساسية من حساسات الشبكة نفسها، وتعمل الحلقة كاملة بدون أي SIEM.</p></div>
+  <div class="card"><b>P4 · تدهور آمن</b><p>سقوط النموذج اللغوي أو أي موصّل لا يوقف الحلقة؛ تستمر بالقواعد الحتمية.</p></div>
+  <div class="card"><b>P5 · الأمان قبل الاستقلالية</b><p>الوضع الافتراضي dry-run، وعند الشك يُبلَّغ إنسان بدل التنفيذ، والاستقلالية تُكتسب بالأدلة.</p></div>
+  <div class="card"><b>P6 · تدقيق كل شيء</b><p>الدليل ثم المدخل ثم المخرج ثم القرار النهائي، قابل لإعادة البناء بعد سنوات.</p></div>
+</div>
+
+<h3>ما الذي يميّز التصميم</h3>
+<ol class="steps">
+  <li><b>ليس في مسار الترافيك:</b> يعمل على نسخة منعكسة (SPAN/TAP)، فسقوطه لا يقطع أي خدمة.</li>
+  <li><b>القرار حتمي:</b> المعادلة والقواعد ثابتة ومختبرة، والنموذج اللغوي استشاري ولا يغيّر نتيجة.</li>
+  <li><b>التنفيذ مقفول افتراضيًا:</b> يحتاج مستوى استقلالية وأمر تشغيل صريحًا ومنفّذًا مضبوطًا.</li>
+  <li><b>سجل مقاوم للتلاعب:</b> سلسلة تجزئة SHA-256 تكشف أي تعديل أو حذف.</li>
+</ol>
+
+<h3>المحتويات</h3>
+<ul class="toc">
+  <li><span class="n">02</span> المعمارية العامة (رسم توضيحي)</li>
+  <li><span class="n">03</span> المكوّنات ومسؤولياتها</li>
+  <li><span class="n">04</span> منطق القرار والسقوف الأمنية</li>
+  <li><span class="n">05</span> مسار التنفيذ والتراجع</li>
+  <li><span class="n">06</span> التدقيق والواجهة وأمانها</li>
+  <li><span class="n">07</span> النشر والتشغيل</li>
+  <li><span class="n">08</span> الحالة الحالية والقيود والقرارات المعلّقة</li>
+</ul>
+</section>
+
+<!-- ====================== 2. ARCHITECTURE ====================== -->
+<section class="page">
+<h2><span class="n">02</span> المعمارية العامة</h2>
+<p>يتدفق كل شيء في اتجاه واحد: من الحساسات إلى الـ daemon، ثم إلى سجل التدقيق، ثم إلى المخرجات. المسار الوحيد الذي يصل إلى الشبكة هو <b>Executor</b> (باللون البرتقالي).</p>
+
+<div class="fig">
+<svg viewBox="0 0 680 548" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Tahoma, sans-serif" style="direction:ltr; unicode-bidi:isolate">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5b6b80" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="arc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#c2492a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<rect x="60" y="24" width="170" height="60" rx="8" fill="#f1efe8" stroke="#888780" stroke-width="0.8"/>
+<text x="145" y="46" text-anchor="middle" font-size="14" font-weight="600" fill="#2c2c2a">Sensors + SIEM</text>
+<text x="145" y="66" text-anchor="middle" font-size="12" fill="#5f5e5a">Suricata · Zeek · Wazuh</text>
+
+<rect x="40" y="112" width="600" height="244" rx="16" fill="#fbfcfe" stroke="#9aa7b8" stroke-width="0.8" stroke-dasharray="5 4"/>
+<text x="624" y="134" text-anchor="end" font-size="12" fill="#5b6b80">Sentinel daemon · shadow by default</text>
+
+<g><rect x="60" y="150" width="170" height="60" rx="8" fill="#e1f5ee" stroke="#0f766e" stroke-width="0.8"/>
+<text x="145" y="172" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">Live sources</text>
+<text x="145" y="192" text-anchor="middle" font-size="12" fill="#0f6e56">Tail · resume-safe</text></g>
+<g><rect x="255" y="150" width="170" height="60" rx="8" fill="#e1f5ee" stroke="#0f766e" stroke-width="0.8"/>
+<text x="340" y="172" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">Detectors</text>
+<text x="340" y="192" text-anchor="middle" font-size="12" fill="#0f6e56">5 attack families</text></g>
+<g><rect x="450" y="150" width="170" height="60" rx="8" fill="#e1f5ee" stroke="#0f766e" stroke-width="0.8"/>
+<text x="535" y="172" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">Correlator</text>
+<text x="535" y="192" text-anchor="middle" font-size="12" fill="#0f6e56">Alerts → incidents</text></g>
+
+<g><rect x="450" y="264" width="170" height="60" rx="8" fill="#e1f5ee" stroke="#0f766e" stroke-width="0.8"/>
+<text x="535" y="286" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">Decision engine</text>
+<text x="535" y="306" text-anchor="middle" font-size="12" fill="#0f6e56">Score · tiers · G1-G7</text></g>
+<g><rect x="255" y="264" width="170" height="60" rx="8" fill="#fdf0e6" stroke="#c2492a" stroke-width="0.8"/>
+<text x="340" y="286" text-anchor="middle" font-size="14" font-weight="600" fill="#8a3a12">Executor</text>
+<text x="340" y="306" text-anchor="middle" font-size="12" fill="#a24a22">Autonomy · dry-run · G6</text></g>
+<g><rect x="60" y="264" width="170" height="60" rx="8" fill="#e1f5ee" stroke="#0f766e" stroke-width="0.8"/>
+<text x="145" y="286" text-anchor="middle" font-size="14" font-weight="600" fill="#085041">Audit store</text>
+<text x="145" y="306" text-anchor="middle" font-size="12" fill="#0f6e56">SQLite · hash chain</text></g>
+
+<g><rect x="40" y="412" width="135" height="60" rx="8" fill="#f1efe8" stroke="#888780" stroke-width="0.8"/>
+<text x="107" y="434" text-anchor="middle" font-size="14" font-weight="600" fill="#2c2c2a">Ops UI</text>
+<text x="107" y="454" text-anchor="middle" font-size="12" fill="#5f5e5a">Loopback only</text></g>
+<g><rect x="195" y="412" width="135" height="60" rx="8" fill="#f1efe8" stroke="#888780" stroke-width="0.8"/>
+<text x="262" y="434" text-anchor="middle" font-size="14" font-weight="600" fill="#2c2c2a">SIEM export</text>
+<text x="262" y="454" text-anchor="middle" font-size="12" fill="#5f5e5a">CEF · HTTPS</text></g>
+<g><rect x="350" y="412" width="135" height="60" rx="8" fill="#fdf0e6" stroke="#c2492a" stroke-width="0.8"/>
+<text x="417" y="434" text-anchor="middle" font-size="14" font-weight="600" fill="#8a3a12">Actuators</text>
+<text x="417" y="454" text-anchor="middle" font-size="12" fill="#a24a22">SOAR · nftables</text></g>
+<g><rect x="505" y="412" width="135" height="60" rx="8" fill="#f1efe8" stroke="#888780" stroke-width="0.8"/>
+<text x="572" y="434" text-anchor="middle" font-size="14" font-weight="600" fill="#2c2c2a">Notifiers</text>
+<text x="572" y="454" text-anchor="middle" font-size="12" fill="#5f5e5a">Slack · Teams · Telegram</text></g>
+
+<g stroke="#5b6b80" stroke-width="1.5" fill="none" marker-end="url(#ar)">
+<line x1="145" y1="84" x2="145" y2="148" marker-end="url(#ar)"/>
+<line x1="230" y1="180" x2="253" y2="180" marker-end="url(#ar)"/>
+<line x1="425" y1="180" x2="448" y2="180" marker-end="url(#ar)"/>
+<line x1="535" y1="210" x2="535" y2="262" marker-end="url(#ar)"/>
+<line x1="448" y1="294" x2="427" y2="294" marker-end="url(#ar)"/>
+<line x1="253" y1="294" x2="232" y2="294" marker-end="url(#ar)"/>
+<line x1="107" y1="324" x2="107" y2="410" marker-end="url(#ar)"/>
+<line x1="215" y1="324" x2="215" y2="410" marker-end="url(#ar)"/>
+<line x1="560" y1="324" x2="560" y2="410" marker-end="url(#ar)"/>
+</g>
+<line x1="400" y1="324" x2="400" y2="410" stroke="#c2492a" stroke-width="1.5" marker-end="url(#arc)"/>
+
+<rect x="60" y="500" width="12" height="12" rx="2" fill="#f1efe8" stroke="#888780"/><text x="80" y="510" font-size="12" fill="#5b6b80">External / read-only</text>
+<rect x="240" y="500" width="12" height="12" rx="2" fill="#e1f5ee" stroke="#0f766e"/><text x="260" y="510" font-size="12" fill="#5b6b80">Core pipeline</text>
+<rect x="390" y="500" width="12" height="12" rx="2" fill="#fdf0e6" stroke="#c2492a"/><text x="410" y="510" font-size="12" fill="#5b6b80">Enforcement (gated)</text>
+</svg>
+</div>
+
+<h3>قراءة الرسم</h3>
+<ol class="steps">
+  <li><b>الإدخال:</b> سجلات الحساسات تُقرأ أثناء كتابتها، مع تذكّر موضع القراءة.</li>
+  <li><b>الاكتشاف والتجميع:</b> تتحول الاتصالات الخام إلى إشارات هجوم، ثم إلى حوادث.</li>
+  <li><b>القرار:</b> يحسب المحرك الدرجة والفئة، ويطبّق قواعد الحماية.</li>
+  <li><b>التنفيذ:</b> لا يمر أي إجراء إلا عبر Executor وبوابات الأمان.</li>
+  <li><b>التدقيق:</b> كل خطوة تُسجَّل في سجل مربوط بسلسلة تجزئة.</li>
+  <li><b>المخرجات:</b> واجهة محلية، وتصدير للـ SIEM، وإشعارات، ومنفّذات.</li>
+</ol>
+<div class="note">النموذج اللغوي (LLM) غير ظاهر في الرسم عمدًا: دوره استشاري، يسجّل رأيه في سجل التدقيق ولا يغيّر أي قرار ولا يصدر أوامر.</div>
+</section>
+
+<!-- ====================== 3. COMPONENTS ====================== -->
+<section class="page">
+<h2><span class="n">03</span> المكوّنات ومسؤولياتها</h2>
+<table>
+<thead><tr><th style="width:24%">المكوّن</th><th>المسؤولية</th><th style="width:27%">الوحدة البرمجية</th></tr></thead>
+<tbody>
+<tr><td class="k">Live sources</td><td>قراءة <code>eve.json</code> وملفات Zeek وتنبيهات Wazuh أثناء كتابتها؛ مقاومة للتدوير وإعادة التشغيل؛ تقرير صحة (سليم / متأخر / متوقف) وعدّاد فقد الحزم.</td><td class="ltr">capture/live.py<br>capture/tail.py</td></tr>
+<tr><td class="k">Detectors</td><td>يحوّل سجلات الاتصال وDNS إلى خمس إشارات: مسح، تخمين كلمات مرور، DDoS، C2 beaconing، تسريب DNS. تحليل متزايد لا يعيد حساب النافذة كاملة.</td><td class="ltr">detectors/suite.py<br>detectors/dns.py</td></tr>
+<tr><td class="k">Correlator</td><td>يدمج التنبيهات بين نفس المصدر ونفس الهدف في حادثة واحدة، وينقسم عند فجوة صمت أكبر من 15 دقيقة.</td><td class="ltr">correlator/correlator.py</td></tr>
+<tr><td class="k">Decision engine</td><td>يحسب الدرجة، يحدد النتيجة، يطبّق سقوف الفئات وسلسلة §3.1، ويدير طابور الموافقات.</td><td class="ltr">decision/engine.py</td></tr>
+<tr><td class="k">Validator</td><td>البوابة الوحيدة بين القرار والمنفّذ (G6): نوع الإجراء، سقف المدة 60 دقيقة، سلسلة الفحوص الست.</td><td class="ltr">validator/__init__.py</td></tr>
+<tr><td class="k">Executor</td><td>المسار الوحيد من القرار إلى الشبكة؛ يطبّق الاستقلالية وdry-run وسقف الساعة، ويسجّل كل فرع.</td><td class="ltr">actuation/executor.py</td></tr>
+<tr><td class="k">Actuators</td><td><code>webhook_soar</code>: طلب تخفيف من الجهة العليا. <code>nftables_local</code>: حظر أو تقييد مؤقت بانتهاء من الـ kernel.</td><td class="ltr">actuators/*.py</td></tr>
+<tr><td class="k">LLM brain</td><td>تصنيف استشاري لحالات ملتبسة؛ مدخلات محصورة بقائمة بيضاء، ومخرجات تُتحقق ببنية JSON صارمة.</td><td class="ltr">brain/*.py</td></tr>
+<tr><td class="k">Audit store</td><td>SQLite للإلحاق فقط، مع محفّزات تمنع التعديل والحذف وسلسلة تجزئة للتحقق.</td><td class="ltr">auditstore/store.py</td></tr>
+<tr><td class="k">Notifiers</td><td>Slack وTeams وTelegram؛ منع التكرار وسقف معدّل؛ موافقات عبر Telegram بالاستطلاع الصادر فقط.</td><td class="ltr">notify/*.py</td></tr>
+<tr><td class="k">SIEM plane</td><td>وارد: تنبيهات هوية Wazuh كأدلة من الفئة C. صادر: القرارات بصيغة CEF أو HTTPS مع علامة تقدّم محفوظة.</td><td class="ltr">siem/*.py</td></tr>
+<tr><td class="k">Ops UI</td><td>لوحة محلية للمراجعة والموافقات وتصنيف المحلل والتدقيق (مفصّلة في القسم 06).</td><td class="ltr">ui/*.py</td></tr>
+</tbody></table>
+
+<h3>مصادر الأدلة وفئات الثقة</h3>
+<table>
+<thead><tr><th style="width:14%">الفئة</th><th style="width:34%">المصدر</th><th>الحد الأقصى للتصرف</th></tr></thead>
+<tbody>
+<tr><td class="k">A</td><td>أدلة السلك فقط (Suricata، Zeek)</td><td>تنفيذ تلقائي عند الدرجة 0.90 فأكثر</td></tr>
+<tr><td class="k">B</td><td>سلك + تحليل سلوكي (الـ Detectors)</td><td>يتحوّل الحظر التلقائي إلى تقييد، وإلا موافقة بشرية</td></tr>
+<tr><td class="k">C</td><td>خارجي (SIEM / الهوية)</td><td>لا تنفيذ تلقائي أبدًا؛ تنبيه أو إنسان فقط</td></tr>
+</tbody></table>
+<p class="note">الحادثة التي تجمع مصادر مختلفة تأخذ <b>أضعف</b> فئة فيها، فدليل ضعيف واحد يكفي لخفض سقف التصرف.</p>
+</section>
+
+<!-- ====================== 4. DECISION ====================== -->
+<section class="page tight">
+<h2><span class="n">04</span> منطق القرار والسقوف الأمنية</h2>
+<h3>معادلة الدرجة</h3>
+<pre>score = confidence × criticality_weight × (severity / 5)
+score = clamp( score + penalties , 0 , 1 )       # penalties قبل التصنيف</pre>
+<div class="two">
+<table>
+<thead><tr><th>أهمية الأصل</th><th>الوزن</th></tr></thead>
+<tbody><tr><td>critical</td><td class="ltr">1.00</td></tr><tr><td>high</td><td class="ltr">0.85</td></tr><tr><td>medium</td><td class="ltr">0.65</td></tr><tr><td>low</td><td class="ltr">0.45</td></tr></tbody></table>
+<table>
+<thead><tr><th>العائلة</th><th>الشدة الافتراضية</th></tr></thead>
+<tbody><tr><td>مسح الشبكة</td><td class="ltr">2</td></tr><tr><td>تسريب DNS</td><td class="ltr">3</td></tr><tr><td>تخمين كلمات المرور · C2</td><td class="ltr">4</td></tr><tr><td>DDoS</td><td class="ltr">5</td></tr></tbody></table>
+</div>
+<p>عقوبتان جمعيتان: خصم <span class="ltr">0.15</span> إذا احتُمل أن المصدر بوابة NAT، وخصم <span class="ltr">0.20</span> إذا جاء التنبيه من VLAN غير مراقبة.</p>
+
+<h3>نطاقات الدرجة</h3>
+<p>أقل من <b class="ltr">0.70</b>: تسجيل فقط. من <b class="ltr">0.70</b> إلى <b class="ltr">0.89</b>: موافقة بشرية (تصبح إشعارًا فقط بعد 15 دقيقة بلا رد). من <b class="ltr">0.90</b> فأكثر: تنفيذ تلقائي بعد كل الفحوص وبحسب الفئة.</p>
+
+<h3>سلّم الاستقلالية</h3>
+<table>
+<thead><tr><th style="width:18%">المستوى</th><th>المعنى</th><th style="width:30%">ما يُنفَّذ فعلًا</th></tr></thead>
+<tbody>
+<tr><td class="k">L0 · shadow</td><td>توصيات فقط، لا يلمس الشبكة، ويجمع بيانات الإنذارات الكاذبة لمدة 14 يومًا</td><td>لا شيء</td></tr>
+<tr><td class="k">L1 · approve</td><td>تنفيذ بعد موافقة بشرية صريحة</td><td>قرارات اعتمدها إنسان</td></tr>
+<tr><td class="k">L2 · auto-critical</td><td>تلقائي للحالات عالية الدرجة من الفئتين A وB</td><td>الموافق عليها + التلقائية</td></tr>
+<tr><td class="k">L3 · full-auto</td><td>تلقائي كامل ضمن حدود المعدّل وقاطع الدائرة</td><td>الكل</td></tr>
+</tbody></table>
+<p>الرفع <b>يدوي دائمًا</b> ومبني على أدلة؛ لوحة التحكم تعرض جاهزيته كقراءة استرشادية فقط.</p>
+
+<h3>قواعد الحماية G1–G7</h3>
+<table>
+<thead><tr><th style="width:9%">القاعدة</th><th>النص</th></tr></thead>
+<tbody>
+<tr><td class="k">G1</td><td>لا إجراء آلي على الأصول الحرجة، ولا استثناء في الكود؛ الاستثناءات من الإعدادات فقط مع تدقيق.</td></tr>
+<tr><td class="k">G2</td><td>dry-run افتراضي في كل مكان؛ التنفيذ الحي يحتاج علمًا صريحًا.</td></tr>
+<tr><td class="k">G3</td><td>كل حظر آلي مؤقت (حتى 60 دقيقة) مع انتهاء تلقائي وتراجع بأمر واحد.</td></tr>
+<tr><td class="k">G4</td><td>سقف معدّل للحظر في الدقيقة والساعة؛ عند التجاوز يتحول إلى إشعار مع إنذار داخلي.</td></tr>
+<tr><td class="k">G5</td><td>قاطع الدائرة: ثلاث عمليات تراجع متتالية تخفض المستوى درجة.</td></tr>
+<tr><td class="k">G6</td><td>المُحقِّق (Validator) بين المحرك وكل منفّذ، دون استثناء.</td></tr>
+<tr><td class="k">G7</td><td>تدقيق كامل: الدليل، مخرجات النموذج حرفيًا، مسار القرار، الفاعل، الوقت.</td></tr>
+</tbody></table>
+</section>
+
+<!-- ====================== 5. ENFORCEMENT ====================== -->
+<section class="page">
+<h2><span class="n">05</span> مسار التنفيذ والتراجع</h2>
+<p>كل قرار يريد أن يصبح إجراءً يمر على الـ Executor بهذه البوابات بالترتيب. أي رفض يُسجَّل بسببه في جدول <code>actions</code>.</p>
+
+<table>
+<thead><tr><th style="width:6%">#</th><th style="width:22%">البوابة</th><th>القاعدة</th><th style="width:21%">نتيجة الرفض</th></tr></thead>
+<tbody>
+<tr><td class="k">1</td><td class="k">توصية قابلة للتنفيذ</td><td>القرار يحمل توصية فعلية (وليس إشعارًا أو تصعيدًا فقط)</td><td>لا شيء يُسجَّل</td></tr>
+<tr><td class="k">2</td><td class="k">الاستقلالية</td><td>النتائج التلقائية تحتاج L2 فأعلى؛ المعتمدة بشريًا تحتاج L1</td><td><span class="pill wr">withheld_autonomy</span></td></tr>
+<tr><td class="k">3</td><td class="k">dry-run</td><td>الافتراضي: تُسجَّل النية فقط ولا يُنفَّذ شيء</td><td><span class="pill wr">dry_run</span></td></tr>
+<tr><td class="k">4</td><td class="k">المُحقِّق G6</td><td>سلسلة §3.1 + سقف 60 دقيقة + نتيجة المحرك</td><td><span class="pill no">rejected_g6</span></td></tr>
+<tr><td class="k">5</td><td class="k">سقف الساعة</td><td>الحد في الإعدادات، ويسري على المعتمد بشريًا أيضًا</td><td><span class="pill no">rate_limited</span></td></tr>
+<tr><td class="k">6</td><td class="k">منفّذ سليم</td><td>يوجد منفّذ مضبوط وصحته جيدة</td><td><span class="pill no">no_actuator / failed</span></td></tr>
+</tbody></table>
+<p>عند النجاح يُسجَّل الصف بالحالة <span class="pill ok">executed</span> ويُجدول تراجع تلقائي عند انتهاء المدة.</p>
+
+<h3>المنفّذات</h3>
+<table>
+<thead><tr><th style="width:20%">المنفّذ</th><th>السلوك</th><th style="width:30%">التحقق منه</th></tr></thead>
+<tbody>
+<tr><td class="k">webhook_soar</td><td>يطلب من الـ SOAR أو الجدار الناري تخفيف DDoS لصالح الضحية (Sentinel لا يحظر هذا الترافيك بنفسه). يرسل <span class="ltr">Bearer</span> من متغير بيئة، مع محاولات محدودة وتدهور صريح عند الفشل.</td><td>خادم HTTP محلي حقيقي</td></tr>
+<tr><td class="k">nftables_local</td><td>ثلاث مجموعات <span class="ltr">blocked / throttled / quarantined</span> بخاصية timeout، تُربط بسلسلتي <span class="ltr">input</span> و<span class="ltr">forward</span>. الانتهاء يتم داخل الـ kernel، والتراجع حذف عنصر، و<code>ctl rollback --all</code> يفرّغ الكل من أي عملية.</td><td>nftables 1.1 حقيقي داخل حاوية بصلاحية NET_ADMIN (أربعة اختبارات)</td></tr>
+</tbody></table>
+<div class="note">على حساس SPAN فقط لا يعبر ترافيك الآخرين عبره، فيحمي <code>nftables_local</code> جهاز الحساس نفسه. أما حماية الشبكة الأوسع فتتم عبر <code>webhook_soar</code>.</div>
+
+<h3>طبقات الأمان الإضافية في المنفّذ</h3>
+<ol class="steps">
+  <li>يرفض عناوين الحلقة المحلية وغير المحددة والبث المتعدد والـ link-local وأي نص ليس عنوان IPv4.</li>
+  <li>لا يكرر نفس الإجراء على نفس الهدف ما دام ساريًا.</li>
+  <li>أي استثناء داخل المنفّذ لا يسقط الحلقة؛ يُسجَّل كحالة failed.</li>
+  <li>موافقة المحلل من لوحة التحكم أو Telegram تمر عبر نفس المسار ولا تتجاوز أي بوابة.</li>
+</ol>
+</section>
+
+<!-- ====================== 6. AUDIT & UI ====================== -->
+<section class="page">
+<h2><span class="n">06</span> التدقيق والواجهة وأمانها</h2>
+<h3>سجل التدقيق</h3>
+<table>
+<thead><tr><th style="width:24%">الجدول</th><th>المحتوى</th></tr></thead>
+<tbody>
+<tr><td class="k ltr">decisions</td><td>كل قرار: النتيجة والدرجة والفئة والسقف المطبّق والتفسير وأحداث التدقيق</td></tr>
+<tr><td class="k ltr">incident_context</td><td>المصدر والهدف والإشارات ومراجع الأدلة (ملف:سطر فقط) وتقنيات MITRE المرشحة</td></tr>
+<tr><td class="k ltr">actions / rollbacks</td><td>كل محاولة تنفيذ بحالتها وسببها، وكل تراجع</td></tr>
+<tr><td class="k ltr">analyst_notes</td><td>تصنيف المحلل (هجوم حقيقي / إنذار كاذب / سليم) وملاحظاته</td></tr>
+<tr><td class="k ltr">llm_pairs</td><td>الطلب والرد حرفيًا لكل استدعاء للنموذج اللغوي</td></tr>
+<tr><td class="k ltr">kpis_events / meta</td><td>مؤشرات القياس وبيانات الإصدار</td></tr>
+<tr><td class="k ltr">audit_chain</td><td>سلسلة التجزئة التي تربط كل ما سبق</td></tr>
+</tbody></table>
+<div class="two">
+<div class="note"><b>حماية من التلاعب:</b> محفّزات SQLite تمنع التعديل والحذف، وسلسلة SHA-256 تكشف حتى من يتجاوز المحفّزات. الأمر <code>ctl audit verify</code> يعيد الحساب ويكشف الصف المعدّل أو المحذوف أو المُدخل خارج الواجهة.</div>
+<div class="warn"><b>حد معروف:</b> حذف ذيل السلسلة لا يُكتشف إلا بمقارنته بقيمة رأس السلسلة المحفوظة خارج الملف. يُنصح بتسجيل الرأس دوريًا في مكان منفصل.</div>
+</div>
+
+<h3>لوحة التحكم (Ops UI)</h3>
+<table>
+<thead><tr><th style="width:22%">الصفحة</th><th>الوظيفة</th></tr></thead>
+<tbody>
+<tr><td class="k">نظرة عامة</td><td>مؤشرات، القرارات عبر الزمن، أكثر المصادر والأهداف، أنواع الهجمات، جاهزية رفع الاستقلالية</td></tr>
+<tr><td class="k">الحوادث</td><td>تصفية بالنتيجة والفئة والنوع وعنوان IP والنص والدرجة وتصنيف المحلل؛ لوحة جانبية بمسار القرارات والأدلة وMITRE</td></tr>
+<tr><td class="k">الموافقات</td><td>طابور الانتظار مع المصدر والهدف، واعتماد أو رفض عبر المحرك، وسجل القرارات البشرية</td></tr>
+<tr><td class="k">المصادر</td><td>صحة كل مصدر، آخر نبضة، فقد الحزم، التدوير</td></tr>
+<tr><td class="k">التدقيق</td><td>بحث وتصدير CSV وزر للتحقق من سلسلة التجزئة</td></tr>
+<tr><td class="k">الإعدادات</td><td>عرض للقراءة فقط؛ الأسرار تظهر كـ «مضبوط / غير مضبوط» دون قيمتها</td></tr>
+</tbody></table>
+
+<h3>نموذج أمان الواجهة</h3>
+<ol class="steps">
+  <li>تقبل الاتصال من الجهاز نفسه فقط (loopback)، ولا يمكن تغيير ذلك بالإعدادات، وتُرفض أي عناوين قابلة للتوجيه.</li>
+  <li>التوكن في ترويسة <code>X-Sentinel-Token</code> فقط (لا ملفات تعريف ارتباط ولا جلسات، فهي محصّنة من CSRF) ويُقارن بزمن ثابت، ويُرفض إن وُضع في الرابط.</li>
+  <li>الاستثناء الوحيد بلا توكن: ملف مكتبة htmx الساكن.</li>
+  <li>الكتابة محصورة في أمرين: اعتماد/رفض عبر المحرك، وتصنيف المحلل الذي يُلحق بالسجل فقط ولا يصل إلى المحرك.</li>
+  <li>الإعدادات غير قابلة للتعديل من الواجهة عمدًا؛ حتى لا يصبح التحكم عن بعد بالقواعد الأمنية ثغرة.</li>
+</ol>
+</section>
+
+<!-- ====================== 7. DEPLOYMENT ====================== -->
+<section class="page">
+<h2><span class="n">07</span> النشر والتشغيل</h2>
+<h3>أنماط النشر</h3>
+<table>
+<thead><tr><th style="width:24%">النمط</th><th>الوصف</th></tr></thead>
+<tbody>
+<tr><td class="k">Python مباشرة</td><td>Windows أو Linux؛ <code>pip install -e ".[ops-ui]"</code> ثم <code>sentinel run</code>. نسخ Python المدعومة 3.9 حتى 3.14.</td></tr>
+<tr><td class="k">Docker</td><td>صورة واحدة تحتوي Sentinel وأدوات nftables، مع فحص صحة يعتمد على حداثة ملف الصحة. بُنيت وجُرّبت فعليًا.</td></tr>
+<tr><td class="k">Compose</td><td>Suricata وZeek وSentinel على واجهة SPAN واحدة؛ يحتاج كرت شبكة موصّلًا بـ SPAN أو TAP وبدون IP.</td></tr>
+</tbody></table>
+
+<h3>أوامر التشغيل الأساسية</h3>
+<pre># الوضع الافتراضي: shadow (لا تنفيذ)
+sentinel --config config.yaml run --capture-dir /var/log/suricata
+
+# مع لوحة التحكم المحلية
+SENTINEL_OPS_UI_TOKEN=... sentinel --config config.yaml run --ui --capture-dir ...
+
+# التنفيذ الحي (يتطلب autonomy_level &gt;= 1 ومنفّذًا مضبوطًا)
+sentinel --no-dry-run --config config.yaml run --capture-dir ...
+
+# تراجع فوري عن كل إجراءات nftables
+sentinel ctl rollback --all
+
+# التحقق من سلامة سجل التدقيق
+sentinel ctl audit verify audit.sqlite [--expect-head HASH]</pre>
+
+<h3>كتل الإعدادات الاختيارية</h3>
+<table>
+<thead><tr><th style="width:22%">الكتلة</th><th>الغرض</th></tr></thead>
+<tbody>
+<tr><td class="k ltr">actuators</td><td><code>nftables_local</code> و<code>webhook_soar</code> (مع <code>url</code>)</td></tr>
+<tr><td class="k ltr">notifiers</td><td>قنوات Slack/Teams/عامة وTelegram؛ الأسرار كأسماء متغيرات بيئة فقط</td></tr>
+<tr><td class="k ltr">siem</td><td>الوارد (Wazuh <code>alerts_file</code>) والصادر (CEF أو HTTPS)</td></tr>
+<tr><td class="k ltr">ops_ui</td><td>التفعيل والمنفذ ومتغير التوكن</td></tr>
+<tr><td class="k ltr">audit_store</td><td>مسار قاعدة التدقيق</td></tr>
+</tbody></table>
+
+<h3>المراقبة والصحة</h3>
+<ul>
+  <li><code>live-health.json</code>: حالة المصادر والتنفيذ، ويستهلكها فحص صحة الحاوية ولوحة التحكم.</li>
+  <li><code>sentinel.prom</code>: مقاييس بصيغة Prometheus لجامع الملفات النصية، دون فتح أي منفذ.</li>
+  <li>سجلات JSON منظمة، وحالة كل إجراء في جدول <code>actions</code>.</li>
+</ul>
+<div class="note">الأسرار (التوكنات، رابط Slack، مفتاح النموذج، مفتاح الـ SOAR) لا تُكتب في أي ملف إعدادات؛ تُمرَّر كمتغيرات بيئة فقط.</div>
+</section>
+
+<!-- ====================== 8. STATUS ====================== -->
+<section class="page">
+<h2><span class="n">08</span> الحالة الحالية والقيود والقرارات المعلّقة</h2>
+<h3>ما تم التحقق منه فعليًا</h3>
+<table>
+<thead><tr><th>البند</th><th style="width:16%">الحالة</th><th style="width:42%">طريقة التحقق</th></tr></thead>
+<tbody>
+<tr><td>491 اختبارًا آليًا</td><td><span class="pill ok">متحقق</span></td><td>Linux مع nftables؛ 487 على Windows (4 تحتاج Linux)</td></tr>
+<tr><td>Python 3.9 إلى 3.14</td><td><span class="pill ok">متحقق</span></td><td>تشغيل الحزمة كاملة على كل إصدار داخل Docker</td></tr>
+<tr><td>صورة Docker وفحص الصحة</td><td><span class="pill ok">متحقق</span></td><td>بناء وتشغيل وقرار وتحقق من السلسلة</td></tr>
+<tr><td>nftables الحقيقي: حظر، انتهاء، تراجع</td><td><span class="pill ok">متحقق</span></td><td>حاوية بصلاحية NET_ADMIN</td></tr>
+<tr><td>SOAR: الإرسال والمصادقة</td><td><span class="pill ok">متحقق</span></td><td>خادم HTTP محلي حقيقي</td></tr>
+<tr><td>كشف الهجمات على بيانات حقيقية</td><td><span class="pill wr">جزئي</span></td><td>سيناريوهات اصطناعية فقط (recall وprecision = 1.0)</td></tr>
+<tr><td>Suricata وZeek حيّان على SPAN</td><td><span class="pill no">غير مجرّب</span></td><td>يحتاج بيئة الحساسات الفعلية</td></tr>
+<tr><td>جدران نارية تجارية (pfSense وغيرها)</td><td><span class="pill no">غير مشمول</span></td><td>لا يمكن التحقق دون الجهاز الحقيقي</td></tr>
+<tr><td>الأداء عند حمل مرتفع</td><td><span class="pill wr">قياس أولي</span></td><td>نحو 5–8 آلاف اتصال/ثانية لكل عملية (الكاشفات فقط)</td></tr>
+</tbody></table>
+
+<h3>القيود المعروفة</h3>
+<div class="warn"><b>الدرجات والتنفيذ:</b> بالمعادلة الحالية، ومع أعلى ثقة ممكنة، فإن <b>DDoS هو الهجوم الوحيد الذي يصل إلى إجراء تنفيذي</b>. تخمين كلمات المرور وC2 لا يتجاوزان 0.68 للأصل «high» أو 0.80 للأصل «critical»، والمسح وDNS لا يتجاوزان 0.60. كما أن G1 تحكم على الضحية (dst) لا على هدف الإجراء، فتحوّل تخمين كلمات المرور ضد أصل حرج إلى تصعيد بشري بدل حظر المهاجم. هذه سياسة أمان مثبّتة لم تُغيَّر عمدًا.</div>
+<ul>
+  <li>اكتشاف الـ beaconing يتطلب 12 اتصالًا منتظمًا، فزمن الكشف 12–24 دقيقة لقناة بفاصل 60–120 ثانية.</li>
+  <li>خفض الاستقلالية تلقائيًا عند ارتفاع الإنذارات الكاذبة منطق موجود في المتحكّم، لكنه غير مغذّى آليًا بعد من تصنيفات المحلل.</li>
+  <li>الدرجات القديمة المسجلة قبل إصلاح ربط الأصول الحرجة كانت تُحسب بأهمية «low».</li>
+  <li>لا يوجد HA ولا Helm ولا OVA؛ كلها تحتاج بنية مستهدفة للتحقق منها.</li>
+</ul>
+
+<h3>قرار معلّق: سياسة الدرجات</h3>
+<table>
+<thead><tr><th style="width:8%">#</th><th>الخيار</th><th style="width:36%">الأثر</th></tr></thead>
+<tbody>
+<tr><td class="k">1</td><td>الإبقاء كما هي</td><td>DDoS فقط يُنفَّذ، والباقي تنبيه وتصعيد. الأكثر تحفظًا.</td></tr>
+<tr><td class="k">2 <span class="pill ok">موصى به</span></td><td>جعل G1 تفحص هدف الإجراء (المهاجم)، واعتماد وزن «critical» للأصول الحرجة</td><td>تخمين كلمات المرور وC2 على الأصول الحرجة يصلان إلى الموافقة البشرية ثم الحظر بعد اعتماد المحلل.</td></tr>
+<tr><td class="k">3</td><td>جعل العتبات قابلة للضبط في الإعدادات</td><td>مرونة أعلى مع مسؤولية ضبط على المشغّل.</td></tr>
+</tbody></table>
+<p class="note">أي من الخيارين 2 و3 يغيّر قاعدة أمان مثبّتة ويحتاج قرارًا صريحًا من المالك قبل التنفيذ.</p>
+</section>
+
+</body>
+</html>
