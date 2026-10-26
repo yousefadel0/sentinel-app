@@ -184,3 +184,19 @@ browser extension — never relax the server-side guard.
 pytest                       # full suite
 pytest --cov=sentinel        # coverage (target ≥85% core; 100% on validator)
 ```
+
+## Live shadow daemon (Phase 1)
+
+`sentinel run` tails Suricata `eve.json` and Zeek `conn/dns/ssl/notice.log`
+as the sensors write them (restart- and rotation-safe offsets in
+`.sentinel-offsets.json`), correlates, decides, and records every decision
+(`case_id="live"`) in the audit store. It is SHADOW-ONLY: nothing executes.
+Capture health (including `degraded` when a log goes quiet and Suricata
+kernel drops) is published to `<capture-dir>/live-health.json`.
+
+```bash
+sentinel --config config.yaml run --capture-dir /var/log/suricata
+```
+
+`docker compose up -d` (see `docker-compose.yml`) runs Suricata + Zeek +
+Sentinel against one SPAN interface (`CAPTURE_IFACE`).

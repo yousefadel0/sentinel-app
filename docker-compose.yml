@@ -1,0 +1,43 @@
+# Sentinel live stack — SPAN-fed Suricata + Zeek write into a shared volume;
+# Sentinel tails it in SHADOW mode (never inline, never actuates).
+#
+#   CAPTURE_IFACE=eth1 docker compose up -d
+#
+# Capture NICs must be attached with no IP (SPAN/TAP, Project.md §3).
+services:
+  suricata:
+    image: jasonish/suricata:latest
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    command: ["-i", "${CAPTURE_IFACE:-eth1}"]
+    volumes:
+      - sensor-logs:/var/log/suricata
+    restart: unless-stopped
+
+  zeek:
+    image: zeek/zeek:latest
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    working_dir: /logs
+    command: ["zeek", "-i", "${CAPTURE_IFACE:-eth1}", "local", "LogAscii::use_json=F"]
+    volumes:
+      - sensor-logs:/logs
+    restart: unless-stopped
+
+  sentinel:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile
+    depends_on: [suricata, zeek]
+    # Suricata writes eve.json and Zeek writes *.log into the same volume.
+    command: ["--config", "/etc/sentinel/config.yaml", "run",
+              "--capture-dir", "/logs"]
+    volumes:
+      - sensor-logs:/logs
+      - ./config.yaml:/etc/sentinel/config.yaml:ro
+      - sentinel-data:/var/lib/sentinel
+    restart: unless-stopped
+
+volumes:
+  sensor-logs:
+  sentinel-data:

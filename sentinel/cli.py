@@ -51,6 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     val = cfg_sub.add_parser("validate", help="strictly validate a config file")
     val.add_argument("path", metavar="PATH", help="path to config.yaml")
 
+    run = sub.add_parser(
+        "run", help="live SHADOW daemon: tail sensor logs, decide, audit")
+    run.add_argument("--capture-dir", required=True, metavar="DIR",
+                     help="directory with Suricata eve.json and Zeek *.log")
+    run.add_argument("--poll-interval", type=float, default=1.0,
+                     help="seconds between polls (default: 1)")
+    run.add_argument("--skip-history", action="store_true",
+                     help="on first start ignore lines already in the logs")
+
     intel = ctl_sub.add_parser("intel", help="read-only threat knowledge operations")
     intel_sub = intel.add_subparsers(dest="intel_command", required=True)
     sync = intel_sub.add_parser(
@@ -59,6 +68,44 @@ def build_parser() -> argparse.ArgumentParser:
                       help="local cache path (default: data/attack/enterprise-attack.json)")
 
     return parser
+
+
+def _run_daemon(args) -> int:
+    import signal
+    import threading
+    from pathlib import Path
+
+    from sentinel.auditstore.store import Store
+    from sentinel.daemon import build_daemon
+
+    if not args.config:
+        print("sentinel run: --config is required", file=sys.stderr)
+        return EXIT_FAIL
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as exc:
+        print(f"REFUSING BOOT — invalid config {args.config} (ref §8):\n{exc}",
+              file=sys.stderr)
+        return EXIT_FAIL
+    store_cfg = cfg.get("audit_store") or {}
+    if not store_cfg.get("path"):
+        print("sentinel run requires `audit_store.path` in the config (ref §8/D5)",
+              file=sys.stderr)
+        return EXIT_FAIL
+    if not args.dry_run:
+        # The live loop is shadow-only until an actuation milestone ships.
+        log.warning("no_dry_run_ignored", reason="live daemon is shadow-only")
+    store = Store(store_cfg["path"])
+    daemon = build_daemon(cfg, Path(args.capture_dir), store,
+                          start_at_end=args.skip_history)
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+    try:
+        daemon.run(stop, args.poll_interval)
+    finally:
+        store.close()
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -88,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_FAIL
         print(f"OK: cached {result['techniques']} ATT&CK techniques at {result['path']}")
         return EXIT_OK
+
+    if args.command == "run":
+        return _run_daemon(args)
 
     # Boot check mode: --config given -> load+validate, report, exit 0/1.
     if args.config:
