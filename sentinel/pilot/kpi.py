@@ -18,6 +18,8 @@ summary line or one average.
 """
 from __future__ import annotations
 
+from sentinel.timeutil import parse_iso
+
 import json
 from datetime import datetime
 from typing import Any
@@ -34,7 +36,7 @@ _FLAGGED_OUTCOMES = frozenset({
 
 def _parse_iso(ts: str) -> datetime | None:
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = parse_iso(ts)
         return dt if dt.tzinfo else None
     except ValueError:
         return None

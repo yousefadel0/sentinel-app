@@ -30,6 +30,7 @@ from sentinel.pilot.kpi import _FLAGGED_OUTCOMES, compute_kpis
 from sentinel.threatintel.attack import enrich_mapping, load_attack_catalog, map_incident
 from sentinel.threatintel.report import new_report, write_report
 from sentinel.threatintel.vulnerabilities import extract_cve_ids, lookup_nvd_cve
+from sentinel.timeutil import parse_iso
 
 log = get_logger("sentinel.pilot.runner")
 
@@ -51,7 +52,7 @@ class VirtualClock:
 
 def _parse_ts(ts: str) -> datetime | None:
     try:
-        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        dt = parse_iso(str(ts))
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None

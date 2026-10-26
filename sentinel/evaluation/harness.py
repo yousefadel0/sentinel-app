@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from sentinel.detectors import DetectorConfig, DetectorSuite
 from sentinel.detectors.dns import dns_signals
+from sentinel.timeutil import parse_iso
 from sentinel.models import (Alert, AlertMeta, AssetHint, ConfidenceTier,
                              SourceRef)
 
@@ -184,7 +185,7 @@ def run_scenario(sc: Scenario, cfg: DetectorConfig | None = None,
 
 
 def _dt(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
+    return parse_iso(ts)
 
 
 def _matches(sc: Scenario, alert: Alert) -> bool:
@@ -211,7 +212,7 @@ def evaluate(seeds=range(10), cfg: DetectorConfig | None = None) -> Report:
             hits = [a for a in emitted if _matches(sc, a)]
             if hits:
                 first = min(hits, key=lambda a: a.ts)
-                delay = (datetime.fromisoformat(first.ts) - T0).total_seconds() - sc.start
+                delay = (parse_iso(first.ts) - T0).total_seconds() - sc.start
                 stats[fam]["tp"] += 1
                 stats[fam]["delays"].append(max(delay, 0.0))
             else:

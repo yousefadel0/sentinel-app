@@ -400,7 +400,7 @@ G7 Full audit trail: raw evidence hash, LLM output verbatim, decision path,
 
 ════════════════════════════════════════════
 
-Python 3.11+ · SQLite (audit/state) · Docker single-image delivery · pytest
+Python 3.9+ (tested 3.9-3.14; was 3.11+) · SQLite (audit/state) · Docker single-image delivery · pytest
 
 (≥85% core coverage; 100% on validator + decision engine) · Suricata +
 

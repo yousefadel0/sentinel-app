@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -245,9 +246,9 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             views.render_incident_detail(app.state.store, incident_id))
 
     @app.get("/audit/search")
-    def audit_search(request: Request, outcome: str | None = None,
-                     case_id: str | None = None, tier: str | None = None,
-                     q: str | None = None, min_score: float | None = None,
+    def audit_search(request: Request, outcome: Optional[str] = None,
+                     case_id: Optional[str] = None, tier: Optional[str] = None,
+                     q: Optional[str] = None, min_score: Optional[float] = None,
                      limit: int = 100, offset: int = 0) -> Response:
         _guard(request)
         rows = views.audit_search(_need_store(), outcome=outcome,
@@ -257,9 +258,9 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         return Response(views.serialize(rows), media_type="application/json")
 
     @app.get("/audit/export.csv")
-    def audit_export(request: Request, outcome: str | None = None,
-                     case_id: str | None = None, tier: str | None = None,
-                     q: str | None = None, min_score: float | None = None,
+    def audit_export(request: Request, outcome: Optional[str] = None,
+                     case_id: Optional[str] = None, tier: Optional[str] = None,
+                     q: Optional[str] = None, min_score: Optional[float] = None,
                      limit: int = 1000) -> Response:
         _guard(request)
         rows = views.audit_search(_need_store(), outcome=outcome,

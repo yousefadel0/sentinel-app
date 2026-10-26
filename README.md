@@ -15,7 +15,7 @@ JSON logging, CLI with dry-run default true, and the two adapter ABCs
 ## Install (dev)
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate   # Python 3.11+ required (§8 pin)
+python3 -m venv .venv && . .venv/bin/activate   # Python 3.9 - 3.14 supported (CI-tested on every version)
 pip install -e '.[dev]'
 ```
 

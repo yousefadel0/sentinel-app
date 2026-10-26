@@ -7,7 +7,7 @@ name = "sentinel"
 version = "0.1.0"
 description = "Sentinel — autonomous AI network defense appliance (M0 scaffold & contracts)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 license = { text = "Proprietary" }
 dependencies = [
     "PyYAML>=6.0",

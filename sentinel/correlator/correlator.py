@@ -22,16 +22,14 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from sentinel.models import Alert
+from sentinel.timeutil import parse_iso
 
 DEFAULT_CORRELATION_WINDOW_S = 900  # 15 min; config wiring deferred to M6 (A1)
 
 
 def _parse_ts(iso: str) -> datetime:
     """Parse an Alert.ts ISO-8601 string into an aware UTC datetime."""
-    dt = datetime.fromisoformat(iso)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    return parse_iso(iso)
 
 
 @dataclass(frozen=True)
