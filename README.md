@@ -231,3 +231,32 @@ New attack types beyond the five v1 families need a scope change in
 * `sentinel run` triages ambiguous incidents (notify/human/escalate)
   ADVISORILY when `brain.llm_endpoint_env` is set: rate-capped, off the
   capture thread, recorded verbatim in `llm_pairs`, never altering a decision.
+
+## Integrations (Phase 5)
+
+Optional config blocks (secrets always come from environment variables):
+
+```yaml
+notifiers:
+  - {type: webhook, url_env: SLACK_WEBHOOK_URL, format: slack}   # slack|teams|generic
+  - {type: telegram, url_env: TG_BOT_TOKEN, chat_id: "123456", approvals: true}
+siem:
+  enabled: true
+  inbound:  {enabled: true, source: wazuh, alerts_file: /var/ossec/logs/alerts/alerts.json,
+             api_url: "-", poll_interval_seconds: 5, token_env: "-"}
+  outbound: {enabled: true, endpoint: "syslog+udp://siem.local:514",   # or https://...
+             batch_size: 100, poll_interval_seconds: 10, token_env: SIEM_TOKEN}
+```
+
+* **Notifications** go out for human-approval / escalate / notify / auto
+  outcomes: deduped, rate-capped, off the capture thread, never fatal.
+* **Telegram approvals** (`/approve <id>`, `/deny <id>` from the one
+  configured chat) use outbound long-polling only and resolve through the
+  same `Engine.resolve` seam as the Ops UI (audit `case_id="telegram"`).
+* **SIEM inbound** tails Wazuh `alerts.json`; evidence is **Tier C** and can
+  never trigger an automated action. **Outbound** exports verdicts as CEF
+  (syslog UDP/TCP) or JSON/HTTPS with a persisted high-water mark.
+
+Not included: vendor firewall actuators (pfSense/Palo Alto/FortiGate) and
+SMTP — they cannot be validated without the real systems, and an untested
+actuator that talks to a production firewall is not something to ship.

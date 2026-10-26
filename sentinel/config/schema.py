@@ -30,6 +30,7 @@ TOP_LEVEL_KEYS = (
     "limits",
     "ops_ui",  # M7 module block; validated here since it is part of §8 schema
     "audit_store",  # M6 (D5): optional SQLite append-only audit store path
+    "notifiers",  # Phase 5: optional outbound notification channels
     "siem",  # M8 (PHASE-2): optional SIEM dual-role plane connector block
 )
 
@@ -152,6 +153,23 @@ SCHEMA: dict[str, dict] = {
                      "constraints": {"min_len": 1}},
         },
     },
+    "notifiers": {
+        # Phase 5: optional channels. Secrets (webhook URL / bot token) are
+        # never in the file — `url_env` names the environment variable.
+        "type": list,
+        "required": False,
+        "constraints": {"item_keys": {
+            "type": {"type": str, "required": True,
+                     "constraints": {"enum": ("webhook", "telegram")}},
+            "url_env": {"type": str, "required": True,
+                        "constraints": {"min_len": 1}},
+            "format": {"type": str, "required": False,
+                       "constraints": {"enum": ("slack", "teams", "generic")}},
+            "chat_id": {"type": str, "required": False,
+                        "constraints": {"cond_req": ("type", "telegram")}},
+            "approvals": {"type": bool, "required": False},
+        }},
+    },
     "siem": {
         # M8 (PHASE-2): optional SIEM dual-role plane connector. Absent
         # block ⇒ fully inert; present-but-disabled ⇒ validated whole but
@@ -177,6 +195,9 @@ SCHEMA: dict[str, dict] = {
                     "token_env": {"type": str, "required": False,
                                   "constraints": {"cond_req": ("enabled", True),
                                                   "min_len": 1}},
+                    # Phase 5: Wazuh alerts.json path (file-tail ingestion;
+                    # no SIEM credentials needed by Sentinel).
+                    "alerts_file": {"type": str, "required": False},
                 },
             },
             "outbound": {

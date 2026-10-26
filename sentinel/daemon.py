@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import threading
 import time
 from collections import deque
@@ -142,7 +143,14 @@ class Daemon:
                  window_s: int = DEFAULT_CORRELATION_WINDOW_S,
                  health_path: Path | None = None,
                  detectors: DetectorSuite | None = None,
-                 triage: AdvisoryTriage | None = None) -> None:
+                 triage: AdvisoryTriage | None = None,
+                 hub=None, exporter=None, approvals=None,
+                 export_every_s: float = 10.0) -> None:
+        self._hub, self._exporter = hub, exporter
+        self._approvals = approvals
+        self._resolutions: queue.Queue = queue.Queue()
+        self._export_every = export_every_s
+        self._last_export = 0.0
         self._triage = triage
         self._detectors = detectors if detectors is not None else DetectorSuite()
         self._health_path = Path(health_path) if health_path else None
@@ -186,6 +194,8 @@ class Daemon:
             self._decide(inc)
             self._decided[key] = (sigs, n)
             made += 1
+        self._apply_resolutions()
+        self._export()
         if self._triage is not None:
             from sentinel.pilot.runner import StorePairSink
             sink = StorePairSink(self._store)
@@ -214,9 +224,20 @@ class Daemon:
         # Liveness is not yet derived from Zeek conn state; "alive" matches
         # the pilot and keeps the daemon shadow-only (nothing executes).
         decision = self._engine.evaluate(incident, Facts(liveness="alive"))
+        self._record(decision, "live")
+        if self._hub is not None:
+            self._hub.notify(decision, incident)
+        if (self._triage is not None
+                and decision.outcome.value in AMBIGUOUS_OUTCOMES):
+            self._triage.submit(f"live-{decision.incident_id}",
+                                incident.alerts, incident.first_ts)
+        log.info("live_decision", incident_id=decision.incident_id,
+                 outcome=decision.outcome.value, score=float(decision.score))
+
+    def _record(self, decision, case_id: str) -> None:
         rec = decision.recommendation
         self._store.record_decision(
-            case_id="live",
+            case_id=case_id,
             incident_id=decision.incident_id,
             outcome=decision.outcome.value,
             score=float(decision.score),
@@ -227,12 +248,30 @@ class Daemon:
             recommendation=(asdict(rec) if rec is not None else {}),
             audit_events=[asdict(e) for e in decision.audit_events],
         )
-        if (self._triage is not None
-                and decision.outcome.value in AMBIGUOUS_OUTCOMES):
-            self._triage.submit(f"live-{decision.incident_id}",
-                                incident.alerts, incident.first_ts)
-        log.info("live_decision", incident_id=decision.incident_id,
-                 outcome=decision.outcome.value, score=float(decision.score))
+
+    def _apply_resolutions(self) -> None:
+        """Chat approvals, applied on THIS thread through Engine.resolve —
+        the same seam, validator chain, window and audit trail as the UI."""
+        while True:
+            try:
+                approval_id, approved = self._resolutions.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                decision = self._engine.resolve(approval_id, approved)
+            except KeyError:
+                continue                 # stale/unknown id: nothing to do
+            self._record(decision, "telegram")
+            log.info("chat_approval_resolved", approval_id=approval_id,
+                     approved=approved)
+
+    def _export(self) -> None:
+        if self._exporter is None:
+            return
+        now = time.monotonic()
+        if now - self._last_export >= self._export_every:
+            self._last_export = now
+            self._exporter.run_once()
 
     # -- health --------------------------------------------------------- #
 
@@ -264,10 +303,16 @@ class Daemon:
 
     def run(self, stop: threading.Event, poll_interval_s: float = 1.0) -> None:
         log.info("daemon_started", sources=len(self._sources), mode="shadow")
+        if self._approvals is not None:
+            self._approvals.start(self._resolutions)
         while not stop.is_set():
             self.run_once()
             self.write_health()
             stop.wait(poll_interval_s)
+        if self._approvals is not None:
+            self._approvals.stop()
+        if self._hub is not None:
+            self._hub.close()
         log.info("daemon_stopped", cycles=self.cycles, decisions=self.decisions)
 
 
@@ -291,6 +336,24 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                                  int(limits["max_blocks_per_hour"])),
         controller=AutonomyController(level=int(cfg["autonomy_level"])),
     ))
+    hub, approvals = _build_notifiers(cfg)
+    siem = cfg.get("siem") or {}
+    exporter = None
+    if siem.get("enabled"):
+        inbound = siem.get("inbound") or {}
+        if inbound.get("enabled") and inbound.get("alerts_file"):
+            from sentinel.siem.inbound import WazuhAlertsFileDataSource
+            sources.append(WazuhAlertsFileDataSource(
+                inbound["alerts_file"], state=state,
+                start_at_end=start_at_end))
+        outbound = siem.get("outbound") or {}
+        if outbound.get("enabled"):
+            from sentinel.siem.outbound import SiemExporter
+            exporter = SiemExporter(
+                store, outbound["endpoint"],
+                capture_dir / ".sentinel-siem-export.json",
+                token_env=outbound.get("token_env"),
+                batch_size=int(outbound["batch_size"]))
     triage = None
     brain = cfg.get("brain") or {}
     env_var = brain.get("llm_endpoint_env")
@@ -301,4 +364,22 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
             hard_cutoff_s=int(brain["hard_cutoff_s"])))
     return Daemon(sources=sources, engine=engine, store=store,
                   health_path=capture_dir / "live-health.json",
-                  triage=triage)
+                  triage=triage, hub=hub, exporter=exporter,
+                  approvals=approvals)
+
+
+def _build_notifiers(cfg: dict):
+    """(NotifierHub | None, TelegramApprovals | None) from the notifiers block."""
+    from sentinel.notify import NotifierHub, TelegramSender, WebhookSender
+    from sentinel.notify.approvals import TelegramApprovals
+
+    senders, approvals = [], None
+    for item in cfg.get("notifiers") or []:
+        if item["type"] == "webhook":
+            senders.append(WebhookSender(item["url_env"],
+                                         item.get("format", "generic")))
+        else:
+            senders.append(TelegramSender(item["url_env"], item["chat_id"]))
+            if item.get("approvals") and approvals is None:
+                approvals = TelegramApprovals(item["url_env"], item["chat_id"])
+    return (NotifierHub(senders) if senders else None), approvals
