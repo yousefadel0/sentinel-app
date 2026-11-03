@@ -51,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     val = cfg_sub.add_parser("validate", help="strictly validate a config file")
     val.add_argument("path", metavar="PATH", help="path to config.yaml")
 
+    sub.add_parser("selftest", help="prove the pipeline works on this machine "
+                   "(temporary folder, touches nothing)")
+
     ui = sub.add_parser(
         "ui", help="serve the Ops UI over an existing audit store (observer)")
     ui.add_argument("--store", metavar="SQLITE", default=None,
@@ -307,6 +310,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ui":
         return _run_ui(args)
+
+    if args.command == "selftest":
+        from sentinel.selftest import main as _selftest
+        return _selftest()
 
     # Boot check mode: --config given -> load+validate, report, exit 0/1.
     if args.config:
