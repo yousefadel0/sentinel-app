@@ -158,7 +158,20 @@ def _config_view(cfg):
     """
     crit_ips = frozenset(str(a["ip"]) for a in cfg["site"]["critical_assets"])
     limits = cfg["limits"]
+    policy = cfg.get("policy") or {}
+    auto_t = float(policy.get("auto_act_threshold", 0.95))
+    human_t = float(policy.get("human_approval_threshold", 0.70))
+    if human_t > auto_t:
+        raise ConfigError("policy.human_approval_threshold exceeds "
+                          "policy.auto_act_threshold")
+    cr = cfg.get("critical_response") or {}
+    crit_min, crit_window = 2.0, 900
+    if cr.get("enabled"):
+        crit_min = float(cr.get("min_score", 0.80))
+        crit_window = int(cr.get("deadline_minutes", 15)) * 60
     return ConfigView(
+        critical_min_score=crit_min, critical_window_s=crit_window,
+        auto_threshold=auto_t, human_threshold=human_t,
         critical_assets=crit_ips,
         monitored_vlans=frozenset(str(v) for v in cfg["monitored_vlans"]),
         asymmetric_risk=str(cfg["placement"]["asymmetric_risk"]),
@@ -176,9 +189,16 @@ def asset_hints(cfg):
     worst-case DDoS at 0.45 and made the 0.70 action band unreachable.
     """
     from sentinel.models import AssetHint
-    return {str(a["ip"]): AssetHint(resolved_hostname=str(a["hostname"]),
-                                    asset_id=str(a["ip"]), criticality="high")
-            for a in cfg["site"]["critical_assets"]}
+    hints = {}
+    for a in cfg["site"].get("assets") or []:           # score-only inventory
+        hints[str(a["ip"])] = AssetHint(
+            resolved_hostname=str(a["hostname"]), asset_id=str(a["ip"]),
+            criticality=str(a["criticality"]))
+    for a in cfg["site"]["critical_assets"]:            # G1 members win
+        hints[str(a["ip"])] = AssetHint(
+            resolved_hostname=str(a["hostname"]), asset_id=str(a["ip"]),
+            criticality=str(a.get("criticality") or "critical"))
+    return hints
 
 
 def run_pilot(config_path, capture_dir, manifest_path=None, *,
@@ -352,10 +372,8 @@ def run_pilot(config_path, capture_dir, manifest_path=None, *,
                 from sentinel.brain.client import LLMClient
                 from sentinel.brain.triage import triage_incident
 
-                client = LLMClient(
-                    env_var,
-                    timeout_s=int(cfg["brain"]["timeout_s"]),
-                    hard_cutoff_s=int(cfg["brain"]["hard_cutoff_s"]))
+                from sentinel.brain.client import llm_client_from_cfg
+                client = llm_client_from_cfg(cfg)
                 sink = StorePairSink(store)
                 for incident in correlator.correlate(alerts):
                     result, _safe = triage_incident(

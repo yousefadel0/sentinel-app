@@ -19,6 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sentinel.capture.adapters_file import zeek_adapter_for
+from sentinel.capture.confidence import (
+    UNKNOWN_FLOOR, ZEEK_NOTICE_CONFIDENCE, ZEEK_NOTICE_SIGNALS,
+    suricata_confidence)
 from sentinel.capture.health import HealthSnapshot
 from sentinel.capture.normalizer import normalize
 from sentinel.capture.tail import OffsetStore, TailReader
@@ -129,12 +132,7 @@ class LiveEveDataSource(_LiveBase):
                 sig = str(raw.get(self._signal_key) or "")
                 if sig:
                     signals = (sig,)
-            conf = 0.5
-            if isinstance(raw.get("alert"), dict):
-                try:
-                    conf = float(raw["alert"].get("confidence", 0.5))
-                except (TypeError, ValueError):
-                    conf = 0.5
+            conf = suricata_confidence(raw)
             if raw.get("event_type") == "dns" and isinstance(raw.get("dns"), dict):
                 signals = (*signals, *dns_signals(raw["dns"].get("rrname")))
             alert = normalize(
@@ -211,13 +209,19 @@ class LiveZeekDataSource(_LiveBase):
                     pass
             elif isinstance(ts, (int, float)):
                 row["ts"] = _iso(float(ts))
+            extra: tuple = ()
+            conf = UNKNOWN_FLOOR
+            if self._adapter == "zeek_notice":
+                mapped = ZEEK_NOTICE_SIGNALS.get(str(row.get("note") or ""))
+                if mapped:                         # Zeek's own attack analytics
+                    extra, conf = (mapped,), ZEEK_NOTICE_CONFIDENCE
             alert = normalize(
                 row, adapter=self._adapter,
                 ref=f"{self._path.name}#{first + i}",
                 vlan=self._vlan, asset_hint=self._assets.get(dst),
-                confidence_raw=0.5,
+                confidence_raw=conf,
                 signals=(f"zeek_{self._path.stem}",
-                         *dns_signals(row.get("query"))))
+                         *dns_signals(row.get("query")), *extra))
             alerts.append(alert)
             self._record_alert(alert)
         if header_changed:

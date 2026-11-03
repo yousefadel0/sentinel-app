@@ -1,11 +1,18 @@
-# Sentinel example config (strictly validated at boot — see Project.md §8).
-# Copy to config.yaml and edit. Secrets are NEVER written here: every
-# *_env key names an environment variable that holds the value.
+# Sentinel — ملف الإعدادات (يُفحص بصرامة عند كل تشغيل، وأي خطأ يمنع الإقلاع).
+# انسخه باسم config.yaml وعدّل القيم. الأسرار لا تُكتب هنا أبدًا:
+# كل مفتاح ينتهي بـ _env هو اسم متغير بيئة يحمل القيمة.
+
 site:
-  name: customer-A
+  name: my-site
+  # أصول محمية (G1): لا يُنفَّذ إجراء آلي يستهدفها، وأهميتها "critical" افتراضيًا.
   critical_assets:
     - {ip: "10.0.0.4", hostname: "dc-01"}
     - {ip: "10.0.0.5", hostname: "dns-primary"}
+  # أصول مهمة غير محمية: تؤثر في الدرجة فقط (critical|high|medium|low).
+  assets:
+    - {ip: "10.0.1.10", hostname: "web-01", criticality: high}
+    - {ip: "10.0.1.20", hostname: "files-01", criticality: medium}
+
 capture_interfaces:
   - {name: core_span, type: af_packet, iface: eth1}
 placement:
@@ -15,14 +22,38 @@ placement:
 monitored_vlans: [prod, mgmt]
 unmapped_vlans: [legacy_lab]
 has_nat: true
+
+# النموذج: بدون متغير البيئة يعمل النظام بالقواعد وحدها (P4).
+# لنموذجكم بصيغة OpenAI-compatible أضف: api_style: openai ، model: <الاسم> ، api_key_env: <متغير>
 brain: {llm_endpoint_env: SENTINEL_LLM_API, timeout_s: 8, hard_cutoff_s: 5}
+
 actuators:
-  - type: nftables_local
-autonomy_level: 0            # ALWAYS start in shadow
+  - type: nftables_local     # Linux فقط، يحتاج صلاحيات root
+# - type: webhook_soar       # طلب تخفيف لجدارك الناري/SOAR (DDoS)
+#   url: https://soar.local/hooks/sentinel
+
+# 0 = مراقبة فقط (لا تنفيذ). 1 = تنفيذ بعد موافقة بشرية. 2 = تلقائي للحالات العالية.
+# لا يتغير تلقائيًا؛ ارفعه بنفسك بعد مراجعة النتائج.
+autonomy_level: 0
 limits: {max_blocks_per_min: 5, max_blocks_per_hour: 20, default_ttl_min: 30}
-audit_store: {path: /var/lib/sentinel/audit.sqlite}
+
+# عتبات القرار: فوق auto_act يتصرف النظام وحده (إن سمح المستوى)، وبينهما يطلب موافقة.
+policy:
+  auto_act_threshold: 0.95
+  human_approval_threshold: 0.70
+
+# الحالات الحرجة: تنبيه عاجل بمهلة، ثم تصرّف تلقائي إن لم يستجب أحد.
+# لا يتجاوز أي بوابة (المستوى 2 فأعلى، dry-run، المُحقِّق، مدة ≤ 60 دقيقة).
+critical_response:
+  enabled: true
+  min_score: 0.80
+  deadline_minutes: 15          # أو 30
+  auto_remediate_on_timeout: true
+  reminder_minutes: 5
+
+audit_store: {path: data/audit.sqlite}
 ops_ui:
-  enabled: false
+  enabled: true
   bind: "127.0.0.1:8080"
   auth_token_env: SENTINEL_OPS_UI_TOKEN
   allowed_ports: [8080]

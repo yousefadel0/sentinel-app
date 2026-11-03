@@ -64,6 +64,7 @@ def pending_queue(engine: Any) -> list[dict[str, Any]]:
             "deadline": dec.approval_deadline.isoformat()
             if dec.approval_deadline else None,
             "would": dec.would,
+            "critical": bool((getattr(dec, "inputs", None) or {}).get("critical")),
         })
     return out
 

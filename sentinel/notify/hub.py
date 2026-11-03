@@ -95,6 +95,14 @@ class NotifierHub:
             self._pool.submit(self._deliver, n)
         return True
 
+    def notify_urgent(self, n: Notification) -> bool:
+        """Critical escalation message: bypasses dedupe and the rate cap, and
+        is delivered synchronously so the caller knows it was attempted."""
+        if not self._senders:
+            return False
+        self._deliver(n)
+        return True
+
     def _deliver(self, n: Notification) -> None:
         for s in self._senders:
             try:

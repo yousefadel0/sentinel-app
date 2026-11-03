@@ -50,6 +50,12 @@ def label_pill(label: Optional[str]) -> str:
     return pill("lbl-" + (key or "none"), LABEL_AR.get(key, key))
 
 
+def origin_pill(origin: Optional[str]) -> str:
+    if origin == "replay":
+        return pill("degraded", "replay · بيانات مسجلة")
+    return pill("healthy", "حي")
+
+
 def score_bar(score: float) -> str:
     s = max(0.0, min(1.0, float(score)))
     return ('<span class="bar"><i style="width:%.0f%%"></i></span> <b>%.0f%%</b>'
@@ -177,7 +183,13 @@ def overview(ov: dict, readiness: dict, kp: dict, pending: int) -> str:
                 % (tone, e(title), e(value), e(sub)))
 
     fp = ov["analyst_fp_rate"]
+    lat = ov["latency"]
+    lat_val = "—" if lat["median_s"] is None else "%s ث" % lat["median_s"]
+    lat_sub = ("الوسيط من أول دليل إلى القرار · %d حادثة حية · p90 %s ث"
+               % (lat["n"], lat["p90_s"])) if lat["n"] else \
+        "لا توجد حوادث حية بعد؛ لا يُحسب رقم بدل الأرقام الحقيقية"
     kpis = "".join((
+        kpi("زمن الاستجابة الفعلي", lat_val, lat_sub),
         kpi("الحوادث", ov["incidents"], "حادثة فريدة في السجل"),
         kpi("بانتظار موافقتك", pending, "قرارات تحتاج بشرًا",
             "warn" if pending else "ok"),
@@ -203,8 +215,25 @@ def overview(ov: dict, readiness: dict, kp: dict, pending: int) -> str:
         ctx_note = ('<p class="note">%d حادثة بلا سياق (قبل تشغيل الـ daemon الحي): '
                     'المصدر والهدف لا يظهران لها.</p>'
                     % (ov["incidents"] - ov["with_context"]))
+    oc = ov["origins"]
+    sw = "".join(
+        '<button class="btn%s" hx-get="/ui/overview?origin=%s" hx-target="#view">%s (%d)</button> '
+        % (" btn-go" if ov["origin"] == key else "", key, label, n)
+        for key, label, n in (("", "الكل", oc["live"] + oc["replay"]),
+                              ("live", "حي", oc["live"]),
+                              ("replay", "replay", oc["replay"])))
+    if ov["origin"] == "replay" or (not ov["origin"] and oc["replay"]):
+        banner = ('<div class="warnbox" style="margin-bottom:12px">هذه الأرقام تشمل حوادث <b>replay</b>: '
+                  'ملفات مسجلة أو بيانات اصطناعية من الـ pilot، وليست ترافيك شبكتك الحي. '
+                  'اختر "حي" لترى ما رصده الحساس فعلًا.</div>')
+    elif not oc["live"] and not oc["replay"]:
+        banner = '<div class="warnbox" style="margin-bottom:12px">لا توجد أي حوادث مسجلة بعد.</div>'
+    else:
+        banner = ""
+    origin_bar = '<div style="margin-bottom:12px">%s</div>%s' % (sw, banner)
     return (
-        '<div class="grid" hx-get="/ui/overview" hx-trigger="every 20s" hx-target="#view">%s</div>' % kpis +
+        origin_bar +
+        '<div class="grid" hx-get="/ui/overview?origin=%s" hx-trigger="every 20s" hx-target="#view">%s</div>' % (ov["origin"], kpis) +
         '<div class="card" style="margin-top:16px"><h2>القرارات عبر الزمن</h2>'
         '<p class="sub">عدد القرارات المسجلة في كل فترة</p>%s</div>' % _timeline(ov["timeline"]) +
         '<div class="cols"><div class="card"><h2>توزيع النتائج</h2>%s</div>'
@@ -235,13 +264,14 @@ def _opts(options, current) -> str:
 def incidents(listing: dict, f: dict) -> str:
     form = (
         '<form class="filters" hx-get="/ui/incidents" hx-target="#view" hx-trigger="submit, change from:select">'
-        '<select name="outcome">%s</select><select name="tier">%s</select>'
+        '<select name="origin">%s</select><select name="outcome">%s</select><select name="tier">%s</select>'
         '<select name="attack_type">%s</select><select name="label">%s</select>'
         '<input name="ip" placeholder="IP مصدر/هدف" value="%s">'
         '<input name="q" placeholder="بحث نصي" value="%s">'
         '<input name="min_score" placeholder="أقل درجة (0-1)" value="%s">'
         '<button class="btn btn-go">تصفية</button></form>'
-        % (_opts([("", "كل النتائج")] + [(k, v) for k, v in OUTCOME_AR.items()], f.get("outcome", "")),
+        % (_opts([("", "حي + replay"), ("live", "حي فقط"), ("replay", "replay فقط")], f.get("origin", "")),
+           _opts([("", "كل النتائج")] + [(k, v) for k, v in OUTCOME_AR.items()], f.get("outcome", "")),
            _opts([("", "كل الفئات"), ("A", "A"), ("B", "B"), ("C", "C")], f.get("tier", "")),
            _opts([("", "كل الأنواع")] + [(k, v) for k, v in ATTACK_AR.items()], f.get("attack_type", "")),
            _opts([("", "كل التصنيفات"), ("unreviewed", "لم تُراجع"),
@@ -254,14 +284,14 @@ def incidents(listing: dict, f: dict) -> str:
         who = ("%s ← %s" % (e(r["dst_ip"]), e(r["src_ip"]))) if r["src_ip"] else "—"
         rows.append(
             '<tr><td>%s</td><td><a href="#" hx-get="/ui/incident/%s" hx-target="#drawer"><code>%s</code></a></td>'
-            '<td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+            '<td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
             % (e(str(r["ts"])[:19]), iid, e(short(r["incident_id"], 16)), who,
                e(ATTACK_AR.get(r["attack_type"], r["attack_type"] or "—")),
                outcome_pill(r["outcome"]), score_bar(r["score"]), e(r["tier"]),
-               label_pill(r["label"])))
+               label_pill(r["label"]), origin_pill(r.get("origin"))))
     table = (empty("لا توجد حوادث مطابقة.") if not rows else
              '<div class="tw"><table><thead><tr><th>الوقت</th><th>الحادثة</th><th>الهدف ← المصدر</th>'
-             '<th>النوع</th><th>النتيجة</th><th>الدرجة</th><th>الفئة</th><th>التصنيف</th></tr></thead>'
+             '<th>النوع</th><th>النتيجة</th><th>الدرجة</th><th>الفئة</th><th>التصنيف</th><th>المصدر</th></tr></thead>'
              '<tbody>%s</tbody></table></div>' % "".join(rows))
 
     def link(page, text):
@@ -276,6 +306,44 @@ def incidents(listing: dict, f: dict) -> str:
     return ('<div class="card"><h2>الحوادث</h2><p class="sub">آخر قرار لكل حادثة. اضغط على رقم الحادثة لفتح التفاصيل والتحكم.</p>'
             '%s%s%s<p class="note"><a href="/audit/export.csv?%s">تصدير CSV للنتائج</a></p></div>'
             % (form, table, pager, e(export_qs)))
+
+
+_WEIGHTS = {"critical": 1.0, "high": 0.85, "medium": 0.65, "low": 0.45}
+
+
+def score_explanation(full: dict) -> str:
+    """Why this score: the real inputs, recorded at decision time."""
+    inp = full.get("inputs") or {}
+    last = full["decisions"][-1]
+    origin = origin_pill(full.get("origin"))
+    if not inp:
+        return ('<div class="card"><h2>لماذا هذه الدرجة؟ %s</h2>'
+                '<p class="note">لم تُسجَّل مدخلات الدرجة لهذه الحادثة (سُجّلت قبل هذا الإصدار).</p></div>' % origin)
+    conf = float(inp.get("confidence", 0))
+    crit = str(inp.get("criticality", "low"))
+    sev = int(inp.get("severity", 1))
+    w = _WEIGHTS.get(crit, 0.45)
+    base = conf * w * sev / 5
+    srcs = "".join('<tr><td><code>%s</code></td><td>%.0f%%</td></tr>' % (e(k), float(v) * 100)
+                   for k, v in sorted((inp.get("confidence_sources") or {}).items()))
+    pens = inp.get("penalties") or []
+    pen_txt = "، ".join("%+.2f" % p for p in pens) if pens else "لا عقوبات"
+    return (
+        '<div class="card"><h2>لماذا هذه الدرجة؟ %s</h2>'
+        '<p class="sub">كل رقم هنا مسجَّل لحظة القرار، وليس مُقدَّرًا لاحقًا.</p>'
+        '<table><tbody>'
+        '<tr><th>الثقة في الدليل</th><td><b>%.0f%%</b>%s</td></tr>'
+        '<tr><th>أهمية الأصل</th><td>%s (وزن <span class="ltr">%.2f</span>)</td></tr>'
+        '<tr><th>شدة الهجوم</th><td><span class="ltr">%d / 5</span> · %s</td></tr>'
+        '<tr><th>الأساس</th><td><span class="ltr">%.2f × %.2f × %d/5 = %.3f</span></td></tr>'
+        '<tr><th>العقوبات</th><td>%s</td></tr>'
+        '<tr><th>الدرجة النهائية</th><td><b>%.0f%%</b> · الفئة %s · %s</td></tr>'
+        '</tbody></table>%s</div>'
+        % (origin, conf * 100,
+           (' <span class="note">(اتفاق مصادر مستقلة)</span>' if len(inp.get("confidence_sources") or {}) > 1 else ""),
+           e(crit), w, sev, e(inp.get("attack_type")), conf, w, sev, base, e(pen_txt),
+           float(last["score"]) * 100, e(last["tier"]), outcome_pill(last["outcome"]),
+           ('<table><thead><tr><th>مصدر الدليل</th><th>ثقته</th></tr></thead><tbody>%s</tbody></table>' % srcs) if srcs else ""))
 
 
 def incident_detail(full: dict, can_annotate: bool) -> str:
@@ -328,7 +396,8 @@ def incident_detail(full: dict, can_annotate: bool) -> str:
             '<p class="note">تُحفظ في سجل التدقيق ولا تغيّر قرار المحرك ولا تنفذ أي إجراء.</p>' % iid)
     else:
         form = '<p class="note">التعليق غير متاح: لا يوجد سجل تدقيق مربوط.</p>'
-    return ('<div class="card">%s<p>التصنيف الحالي: %s</p>%s</div>'
+    return (score_explanation(full) +
+            '<div class="card">%s<p>التصنيف الحالي: %s</p>%s</div>'
             '<div class="card"><h2>مسار القرارات</h2><div class="tl">%s</div></div>'
             '<div class="card"><h2>مراجعة المحلل</h2>%s%s<hr style="border-color:var(--line)">%s</div>'
             % (head, label_pill(full["verdict"]), context, "".join(tl), form, "", notes))
@@ -336,7 +405,21 @@ def incident_detail(full: dict, can_annotate: bool) -> str:
 
 # -- approvals ------------------------------------------------------------- #
 
-def approvals(pending: list, history: list, engine_attached: bool) -> str:
+def _countdown(deadline_iso: Optional[str]) -> str:
+    """Server-side remaining time (the tab refreshes every 15 s)."""
+    from datetime import datetime, timezone
+    from sentinel.timeutil import parse_iso
+    try:
+        left = int((parse_iso(str(deadline_iso)) - datetime.now(timezone.utc)).total_seconds())
+    except ValueError:
+        return "—"
+    if left <= 0:
+        return "انتهى الوقت"
+    return "%d:%02d" % (left // 60, left % 60)
+
+
+def approvals(pending: list, history: list, engine_attached: bool,
+              can_ack: bool = False) -> str:
     if not engine_attached:
         body = ('<div class="warnbox">وضع مشاهدة فقط: لا يوجد محرك قرارات متصل بهذه الواجهة، '
                 'لذلك لا توجد موافقات ولا يمكن اتخاذ قرار منها. شغّل <code>sentinel run --ui</code> '
@@ -347,16 +430,30 @@ def approvals(pending: list, history: list, engine_attached: bool) -> str:
         rows = []
         for p in pending:
             aid = e(p["approval_id"])
+            crit = p.get("critical")
+            w = p.get("watch") or {}
+            acked = w.get("acked_by")
+            badge = ""
+            if crit:
+                badge = ' ' + pill("down", "حرج") + (
+                    ' ' + pill("healthy", "استلمها %s" % acked) if acked else "")
+            ack_btn = ""
+            if crit and can_ack and not acked:
+                ack_btn = (' <button class="btn" hx-post="/approvals/%s/ack" '
+                           'hx-target="#approvals-result" hx-confirm="تأكيد الاستلام؟ سيتوقف التصرف التلقائي.">'
+                           'استلمت الحالة</button>' % aid)
+            deadline_cell = ("%s<br><b>باقي %s</b>" % (e(p["deadline"]), e(_countdown(p["deadline"])))
+                             if crit else e(p["deadline"]))
             rows.append(
-                '<tr><td><a href="#" hx-get="/ui/incident/%s" hx-target="#drawer"><code>%s</code></a></td>'
+                '<tr><td><a href="#" hx-get="/ui/incident/%s" hx-target="#drawer"><code>%s</code></a>%s</td>'
                 '<td><code>%s ← %s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                 '<td><button class="btn btn-ok" hx-post="/approvals/%s/approve" hx-target="#approvals-result" '
                 'hx-confirm="اعتماد هذا القرار؟ سيُسجَّل في التدقيق.">اعتماد</button> '
                 '<button class="btn btn-no" hx-post="/approvals/%s/deny" hx-target="#approvals-result" '
-                'hx-confirm="رفض هذا القرار؟">رفض</button></td></tr>'
-                % (aid, e(short(p["approval_id"], 16)), e(p.get("dst_ip") or "—"), e(p.get("src_ip") or "—"),
+                'hx-confirm="رفض هذا القرار؟">رفض</button>%s</td></tr>'
+                % (aid, e(short(p["approval_id"], 16)), badge, e(p.get("dst_ip") or "—"), e(p.get("src_ip") or "—"),
                    e(ATTACK_AR.get(p.get("attack_type"), p.get("attack_type") or "—")),
-                   score_bar(p["score"]), e(p["tier"]), e(p["deadline"]), aid, aid))
+                   score_bar(p["score"]), e(p["tier"]), deadline_cell, aid, aid, ack_btn))
         body = ('<div class="tw"><table><thead><tr><th>الحادثة</th><th>الهدف ← المصدر</th><th>النوع</th>'
                 '<th>الدرجة</th><th>الفئة</th><th>الموعد النهائي</th><th>القرار</th></tr></thead><tbody>%s</tbody></table></div>'
                 '<div id="approvals-result" aria-live="polite"></div>'

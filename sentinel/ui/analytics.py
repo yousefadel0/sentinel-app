@@ -23,6 +23,10 @@ _LATEST_DECISION = ("d.id IN (SELECT MAX(id) FROM decisions"
 _JOIN = (" FROM decisions d LEFT JOIN incident_context c ON c.id ="
          " (SELECT MAX(id) FROM incident_context WHERE incident_id ="
          " d.incident_id)")
+ORIGINS = ("live", "replay")
+_ORIGIN_SQL = ("CASE WHEN EXISTS (SELECT 1 FROM decisions x WHERE"
+               " x.incident_id = d.incident_id AND x.case_id = 'pilot')"
+               " THEN 'replay' ELSE 'live' END")
 _LABEL = ("(SELECT label FROM analyst_notes n WHERE n.incident_id ="
           " d.incident_id AND n.label != '' ORDER BY n.id DESC LIMIT 1)")
 
@@ -46,9 +50,12 @@ def _ts(value: str) -> Optional[datetime]:
 def incident_list(store: Store, *, outcome: str = "", tier: str = "",
                   attack_type: str = "", ip: str = "", q: str = "",
                   label: str = "", min_score: Optional[float] = None,
-                  page: int = 1) -> dict[str, Any]:
+                  origin: str = "", page: int = 1) -> dict[str, Any]:
     """Latest decision per incident, joined with context + analyst verdict."""
     where, params = [_LATEST_DECISION], []
+    if origin in ORIGINS:
+        where.append(_ORIGIN_SQL + " = ?")
+        params.append(origin)
     if outcome:
         where.append("d.outcome = ?")
         params.append(outcome)
@@ -79,11 +86,11 @@ def incident_list(store: Store, *, outcome: str = "", tier: str = "",
     rows = store.query(
         "SELECT d.incident_id, d.ts, d.outcome, d.score, d.tier, d.would,"
         " d.case_id, c.src_ip, c.dst_ip, c.attack_type, c.alert_count,"
-        " " + _LABEL + _JOIN + clause + " ORDER BY d.id DESC LIMIT ? OFFSET ?",
+        " " + _LABEL + ", " + _ORIGIN_SQL + _JOIN + clause + " ORDER BY d.id DESC LIMIT ? OFFSET ?",
         tuple(params) + (PAGE_SIZE, (page - 1) * PAGE_SIZE))
     cols = ("incident_id", "ts", "outcome", "score", "tier", "would",
             "case_id", "src_ip", "dst_ip", "attack_type", "alert_count",
-            "label")
+            "label", "origin")
     return {"total": int(total), "page": page, "page_size": PAGE_SIZE,
             "pages": max(1, -(-int(total) // PAGE_SIZE)),
             "rows": [dict(zip(cols, r)) for r in rows]}
@@ -121,7 +128,13 @@ def incident_full(store: Store, incident_id: str) -> Optional[dict[str, Any]]:
                  "SELECT id, ts, actor, label, note FROM analyst_notes"
                  " WHERE incident_id = ? ORDER BY id ASC", (incident_id,))]
     verdict = next((n["label"] for n in reversed(notes) if n["label"]), "")
-    return {"incident_id": incident_id, "decisions": decisions,
+    inp = store.query(
+        "SELECT inputs FROM incident_inputs WHERE incident_id = ?"
+        " ORDER BY id DESC LIMIT 1", (incident_id,))
+    inputs = _json(inp[0][0], {}) if inp else {}
+    is_replay = any(d["case_id"] == "pilot" for d in decisions)
+    return {"incident_id": incident_id, "inputs": inputs,
+            "origin": "replay" if is_replay else "live", "decisions": decisions,
             "context": contexts[-1] if contexts else None,
             "context_history": len(contexts), "notes": notes,
             "verdict": verdict}
@@ -129,10 +142,46 @@ def incident_full(store: Store, incident_id: str) -> Optional[dict[str, Any]]:
 
 # -- overview ------------------------------------------------------------- #
 
-def overview(store: Store, buckets: int = 24) -> dict[str, Any]:
+def origin_counts(store: Store) -> dict[str, int]:
+    rows = store.query("SELECT " + _ORIGIN_SQL + ", COUNT(*)" + _JOIN +
+                       " WHERE " + _LATEST_DECISION + " GROUP BY 1")
+    out = {"live": 0, "replay": 0}
+    for name, n in rows:
+        out[name] = int(n)
+    return out
+
+
+def decision_latency(store: Store) -> dict[str, Any]:
+    """Seconds from the FIRST evidence of an incident to its first decision,
+    for LIVE incidents only (replay timestamps are not wall-clock). Both ends
+    are real stamps; values outside 0..24h are discarded as clock skew."""
+    rows = store.query(
+        "SELECT MIN(d.id), MIN(d.ts), c.first_ts FROM decisions d"
+        " JOIN incident_context c ON c.incident_id = d.incident_id"
+        " WHERE d.case_id = 'live' GROUP BY d.incident_id")
+    vals = []
+    for _, dts, first in rows:
+        a, b = _ts(dts), _ts(first)
+        if a and b:
+            sec = (a - b).total_seconds()
+            if 0 <= sec <= 86400:
+                vals.append(sec)
+    vals.sort()
+    n = len(vals)
+    return {"n": n,
+            "median_s": round(vals[n // 2], 1) if n else None,
+            "p90_s": round(vals[min(n - 1, int(n * 0.9))], 1) if n else None}
+
+
+def overview(store: Store, buckets: int = 24,
+             origin: str = "") -> dict[str, Any]:
+    oc = origin_counts(store)
+    if origin not in ORIGINS:
+        origin = "live" if oc["live"] else ""
+    ocl = (" AND " + _ORIGIN_SQL + " = '" + origin + "'") if origin else ""
     latest = store.query(
         "SELECT d.outcome, d.tier, c.src_ip, c.dst_ip, c.attack_type, "
-        + _LABEL + _JOIN + " WHERE " + _LATEST_DECISION)
+        + _LABEL + _JOIN + " WHERE " + _LATEST_DECISION + ocl)
     outcomes: dict[str, int] = {}
     attack: dict[str, int] = {}
     srcs: dict[str, int] = {}
@@ -154,7 +203,8 @@ def overview(store: Store, buckets: int = 24) -> dict[str, Any]:
     reviewed = sum(labels.values())
 
     stamps = [t for t in (_ts(r[0]) for r in store.query(
-        "SELECT ts FROM decisions ORDER BY id ASC")) if t]
+        "SELECT d.ts FROM decisions d WHERE 1=1" + ocl.replace(
+            _ORIGIN_SQL, _ORIGIN_SQL) + " ORDER BY d.id ASC")) if t]
     timeline: list[dict[str, Any]] = []
     span_days = None
     if stamps:
@@ -186,6 +236,8 @@ def overview(store: Store, buckets: int = 24) -> dict[str, Any]:
         "judged": judged,
         "timeline": timeline, "span_days": span_days,
         "with_context": sum(1 for r in latest if r[2]),
+        "origin": origin, "origins": oc,
+        "latency": decision_latency(store),
     }
 
 

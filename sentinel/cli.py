@@ -239,7 +239,9 @@ def _run_daemon(args) -> int:
             target=serve, daemon=True, name="ops-ui",
             kwargs=dict(cfg=cfg, engine=daemon._engine, store=store,
                         capture_dir=Path(args.capture_dir),
-                        on_resolved=daemon.execute_approved)).start()
+                        on_resolved=daemon.execute_approved,
+                        on_ack=daemon.acknowledge,
+                        critical_status=daemon.critical_status)).start()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())

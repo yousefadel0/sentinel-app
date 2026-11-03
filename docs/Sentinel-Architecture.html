@@ -83,7 +83,7 @@ ol.steps li { margin-bottom: 1mm; }
   <div class="rule"></div>
   <p class="tag">جهاز دفاع شبكي ذاتي يعمل كبرمجية: يلتقط الترافيك عبر SPAN، يكتشف الهجمات، ويقرر بمحرك حتمي مع مساعدة نموذج لغوي محدود الدور، وينفّذ الحماية داخل حدود أمان صارمة مع سجل تدقيق كامل.</p>
   <div class="meta">
-    <div>الإصدار<b>0.1.0 · commit ff164c8</b></div>
+    <div>الإصدار<b><span dir="ltr">1.0.0-rc1</span></b></div>
     <div>التاريخ<b>26 أكتوبر 2026</b></div>
     <div>البيئات المدعومة<b>Python 3.9 – 3.14 · Windows / Linux</b></div>
   </div>
@@ -98,7 +98,7 @@ ol.steps li { margin-bottom: 1mm; }
   <div class="kpi"><div class="v">5</div><div class="l">عائلات هجوم مغطّاة</div></div>
   <div class="kpi"><div class="v">L0–L3</div><div class="l">سلّم الاستقلالية</div></div>
   <div class="kpi"><div class="v">60</div><div class="l">أقصى مدة لأي إجراء (دقيقة)</div></div>
-  <div class="kpi"><div class="v">491</div><div class="l">اختبار آلي (Linux)</div></div>
+  <div class="kpi"><div class="v">543</div><div class="l">اختبار آلي (Linux)</div></div>
 </div>
 
 <h3>المبادئ الستة التي يقوم عليها التصميم</h3>
@@ -260,7 +260,7 @@ score = clamp( score + penalties , 0 , 1 )       # penalties قبل التصني
 <p>عقوبتان جمعيتان: خصم <span class="ltr">0.15</span> إذا احتُمل أن المصدر بوابة NAT، وخصم <span class="ltr">0.20</span> إذا جاء التنبيه من VLAN غير مراقبة.</p>
 
 <h3>نطاقات الدرجة</h3>
-<p>أقل من <b class="ltr">0.70</b>: تسجيل فقط. من <b class="ltr">0.70</b> إلى <b class="ltr">0.89</b>: موافقة بشرية (تصبح إشعارًا فقط بعد 15 دقيقة بلا رد). من <b class="ltr">0.90</b> فأكثر: تنفيذ تلقائي بعد كل الفحوص وبحسب الفئة.</p>
+<p>العتبتان قابلتان للضبط (<code>policy</code>)، وافتراضهما: أقل من <b class="ltr">0.70</b> تسجيل فقط؛ من <b class="ltr">0.70</b> حتى أقل من <b class="ltr">0.95</b> موافقة بشرية؛ <b class="ltr">0.95</b> فأكثر تنفيذ تلقائي بعد كل الفحوص وبحسب الفئة. الحالة <b>الحرجة</b> (موافقة بشرية بدرجة <b class="ltr">0.80</b> فأكثر) تأخذ مهلة وتصعيدًا عاجلًا (القسم 05).</p>
 
 <h3>سلّم الاستقلالية</h3>
 <table>
@@ -277,7 +277,7 @@ score = clamp( score + penalties , 0 , 1 )       # penalties قبل التصني
 <table>
 <thead><tr><th style="width:9%">القاعدة</th><th>النص</th></tr></thead>
 <tbody>
-<tr><td class="k">G1</td><td>لا إجراء آلي على الأصول الحرجة، ولا استثناء في الكود؛ الاستثناءات من الإعدادات فقط مع تدقيق.</td></tr>
+<tr><td class="k">G1</td><td>لا إجراء آلي <b>يستهدف</b> أصلًا حرجًا (هدف الإجراء: المهاجم عند الحظر، والوجهة عند الحجر)، ولا استثناء في الكود.</td></tr>
 <tr><td class="k">G2</td><td>dry-run افتراضي في كل مكان؛ التنفيذ الحي يحتاج علمًا صريحًا.</td></tr>
 <tr><td class="k">G3</td><td>كل حظر آلي مؤقت (حتى 60 دقيقة) مع انتهاء تلقائي وتراجع بأمر واحد.</td></tr>
 <tr><td class="k">G4</td><td>سقف معدّل للحظر في الدقيقة والساعة؛ عند التجاوز يتحول إلى إشعار مع إنذار داخلي.</td></tr>
@@ -288,7 +288,7 @@ score = clamp( score + penalties , 0 , 1 )       # penalties قبل التصني
 </section>
 
 <!-- ====================== 5. ENFORCEMENT ====================== -->
-<section class="page">
+<section class="page tight">
 <h2><span class="n">05</span> مسار التنفيذ والتراجع</h2>
 <p>كل قرار يريد أن يصبح إجراءً يمر على الـ Executor بهذه البوابات بالترتيب. أي رفض يُسجَّل بسببه في جدول <code>actions</code>.</p>
 
@@ -296,13 +296,22 @@ score = clamp( score + penalties , 0 , 1 )       # penalties قبل التصني
 <thead><tr><th style="width:6%">#</th><th style="width:22%">البوابة</th><th>القاعدة</th><th style="width:21%">نتيجة الرفض</th></tr></thead>
 <tbody>
 <tr><td class="k">1</td><td class="k">توصية قابلة للتنفيذ</td><td>القرار يحمل توصية فعلية (وليس إشعارًا أو تصعيدًا فقط)</td><td>لا شيء يُسجَّل</td></tr>
-<tr><td class="k">2</td><td class="k">الاستقلالية</td><td>النتائج التلقائية تحتاج L2 فأعلى؛ المعتمدة بشريًا تحتاج L1</td><td><span class="pill wr">withheld_autonomy</span></td></tr>
+<tr><td class="k">2</td><td class="k">الاستقلالية</td><td>التلقائي وتصرّف المهلة يحتاجان L2 فأعلى؛ المعتمد بشريًا يحتاج L1</td><td><span class="pill wr">withheld_autonomy</span></td></tr>
 <tr><td class="k">3</td><td class="k">dry-run</td><td>الافتراضي: تُسجَّل النية فقط ولا يُنفَّذ شيء</td><td><span class="pill wr">dry_run</span></td></tr>
 <tr><td class="k">4</td><td class="k">المُحقِّق G6</td><td>سلسلة §3.1 + سقف 60 دقيقة + نتيجة المحرك</td><td><span class="pill no">rejected_g6</span></td></tr>
 <tr><td class="k">5</td><td class="k">سقف الساعة</td><td>الحد في الإعدادات، ويسري على المعتمد بشريًا أيضًا</td><td><span class="pill no">rate_limited</span></td></tr>
 <tr><td class="k">6</td><td class="k">منفّذ سليم</td><td>يوجد منفّذ مضبوط وصحته جيدة</td><td><span class="pill no">no_actuator / failed</span></td></tr>
 </tbody></table>
 <p>عند النجاح يُسجَّل الصف بالحالة <span class="pill ok">executed</span> ويُجدول تراجع تلقائي عند انتهاء المدة.</p>
+
+<h3>الاستجابة للحالات الحرجة (المهلة)</h3>
+<ol class="steps">
+  <li><b>التعريف:</b> قرار «موافقة بشرية» بدرجة <span class="ltr">0.80</span> فأكثر (قابل للضبط). تُمنح مهلة 15 أو 30 دقيقة.</li>
+  <li><b>التنبيه العاجل:</b> يذكر ما حدث وما المطلوب و<b>موعد انتهاء الوقت</b> وما سيفعله النظام بنفسه، ويتكرر كل 5 دقائق.</li>
+  <li><b>الاستجابة البشرية:</b> اعتماد أو رفض يُنهي الحالة، و«استلمت» (<span class="ltr">/ack</span>) توقف التصرف التلقائي.</li>
+  <li><b>عند انتهاء المهلة بلا استجابة:</b> ينفّذ النظام التوصية بنفسه عبر <b>نفس البوابات</b> (L2، dry-run، المُحقِّق، مدة حتى 60 دقيقة، سقف الساعة) ويسجّل كل خطوة.</li>
+  <li><b>استثناء ثابت:</b> الحالات المحوّلة بسبب G1 (هدف الإجراء أصل محمي) تبقى بشرية فقط ولا يُتصرَّف فيها تلقائيًا.</li>
+</ol>
 
 <h3>المنفّذات</h3>
 <table>
@@ -419,7 +428,7 @@ sentinel ctl audit verify audit.sqlite [--expect-head HASH]</pre>
 <table>
 <thead><tr><th>البند</th><th style="width:16%">الحالة</th><th style="width:42%">طريقة التحقق</th></tr></thead>
 <tbody>
-<tr><td>491 اختبارًا آليًا</td><td><span class="pill ok">متحقق</span></td><td>Linux مع nftables؛ 487 على Windows (4 تحتاج Linux)</td></tr>
+<tr><td>543 اختبارًا آليًا</td><td><span class="pill ok">متحقق</span></td><td>Linux مع nftables؛ 539 على Windows (4 تحتاج Linux)</td></tr>
 <tr><td>Python 3.9 إلى 3.14</td><td><span class="pill ok">متحقق</span></td><td>تشغيل الحزمة كاملة على كل إصدار داخل Docker</td></tr>
 <tr><td>صورة Docker وفحص الصحة</td><td><span class="pill ok">متحقق</span></td><td>بناء وتشغيل وقرار وتحقق من السلسلة</td></tr>
 <tr><td>nftables الحقيقي: حظر، انتهاء، تراجع</td><td><span class="pill ok">متحقق</span></td><td>حاوية بصلاحية NET_ADMIN</td></tr>
@@ -430,24 +439,38 @@ sentinel ctl audit verify audit.sqlite [--expect-head HASH]</pre>
 <tr><td>الأداء عند حمل مرتفع</td><td><span class="pill wr">قياس أولي</span></td><td>نحو 5–8 آلاف اتصال/ثانية لكل عملية (الكاشفات فقط)</td></tr>
 </tbody></table>
 
-<h3>القيود المعروفة</h3>
-<div class="warn"><b>الدرجات والتنفيذ:</b> بالمعادلة الحالية، ومع أعلى ثقة ممكنة، فإن <b>DDoS هو الهجوم الوحيد الذي يصل إلى إجراء تنفيذي</b>. تخمين كلمات المرور وC2 لا يتجاوزان 0.68 للأصل «high» أو 0.80 للأصل «critical»، والمسح وDNS لا يتجاوزان 0.60. كما أن G1 تحكم على الضحية (dst) لا على هدف الإجراء، فتحوّل تخمين كلمات المرور ضد أصل حرج إلى تصعيد بشري بدل حظر المهاجم. هذه سياسة أمان مثبّتة لم تُغيَّر عمدًا.</div>
+<h3>ما الذي يصل إلى تنفيذ فعلًا؟ (أعلى ثقة ممكنة = 1.0)</h3>
+<table>
+<thead><tr><th>الهجوم</th><th>أصل critical</th><th>أصل high</th><th>أصل medium</th></tr></thead>
+<tbody>
+<tr><td class="k">DDoS</td><td>تلقائي (1.00)</td><td>موافقة + حرج (0.85)</td><td>تسجيل (0.65)</td></tr>
+<tr><td class="k">تخمين كلمات المرور</td><td>موافقة + حرج (0.80)</td><td>تسجيل (0.68)</td><td>تسجيل (0.52)</td></tr>
+<tr><td class="k">C2 beaconing</td><td>موافقة + حرج (0.80)</td><td>تسجيل (0.68)</td><td>تسجيل (0.52)</td></tr>
+<tr><td class="k">مسح الشبكة</td><td colspan="3">لا يتجاوز 0.40 → تسجيل دائمًا (شدته 2 من 5)</td></tr>
+<tr><td class="k">تسريب DNS</td><td colspan="3">لا يتجاوز 0.60 → تسجيل دائمًا (شدته 3 من 5)</td></tr>
+</tbody></table>
+<div class="warn"><b>قيد معروف:</b> المسح وتسريب DNS لن يُنفَّذ لهما إجراء بالمعادلة الحالية مهما بلغت الثقة، لأن شدتهما الافتراضية منخفضة (2 و3). إن أردت أن يصلا لمستوى الموافقة فالمطلوب رفع شدتهما في الجدول <span class="ltr">SEVERITY_DEFAULTS</span> بقرار صريح.</div>
+
+<h3>قيود أخرى معروفة</h3>
 <ul>
   <li>اكتشاف الـ beaconing يتطلب 12 اتصالًا منتظمًا، فزمن الكشف 12–24 دقيقة لقناة بفاصل 60–120 ثانية.</li>
   <li>خفض الاستقلالية تلقائيًا عند ارتفاع الإنذارات الكاذبة منطق موجود في المتحكّم، لكنه غير مغذّى آليًا بعد من تصنيفات المحلل.</li>
-  <li>الدرجات القديمة المسجلة قبل إصلاح ربط الأصول الحرجة كانت تُحسب بأهمية «low».</li>
+  <li>النموذج اللغوي استشاري ولا يغيّر القرار؛ ويدعم الصيغة المباشرة وصيغة OpenAI-compatible.</li>
   <li>لا يوجد HA ولا Helm ولا OVA؛ كلها تحتاج بنية مستهدفة للتحقق منها.</li>
 </ul>
 
-<h3>قرار معلّق: سياسة الدرجات</h3>
+<div style="break-before: page"><h3>مصدر كل رقم</h3>
 <table>
-<thead><tr><th style="width:8%">#</th><th>الخيار</th><th style="width:36%">الأثر</th></tr></thead>
+<thead><tr><th style="width:24%">الرقم</th><th>من أين يأتي</th></tr></thead>
 <tbody>
-<tr><td class="k">1</td><td>الإبقاء كما هي</td><td>DDoS فقط يُنفَّذ، والباقي تنبيه وتصعيد. الأكثر تحفظًا.</td></tr>
-<tr><td class="k">2 <span class="pill ok">موصى به</span></td><td>جعل G1 تفحص هدف الإجراء (المهاجم)، واعتماد وزن «critical» للأصول الحرجة</td><td>تخمين كلمات المرور وC2 على الأصول الحرجة يصلان إلى الموافقة البشرية ثم الحظر بعد اعتماد المحلل.</td></tr>
-<tr><td class="k">3</td><td>جعل العتبات قابلة للضبط في الإعدادات</td><td>مرونة أعلى مع مسؤولية ضبط على المشغّل.</td></tr>
+<tr><td class="k">ثقة Suricata</td><td>metadata الخاص بالقاعدة، ثم <span class="ltr">alert.severity</span> (1→0.85، 2→0.70، 3→0.55)، وإلا حد أدنى 0.40 مسمّى صراحة</td></tr>
+<tr><td class="k">ثقة Zeek / Wazuh</td><td>تنبيهات <span class="ltr">notice.log</span> المعروفة (0.80)؛ و<span class="ltr">rule.level</span> لـ Wazuh</td></tr>
+<tr><td class="k">اتفاق المصادر</td><td>noisy-OR عبر مصادر مستقلة فقط (مصدر واحد مرتين لا يزيد الثقة)</td></tr>
+<tr><td class="k">أهمية الأصل / الشدة</td><td>من الإعدادات (لكل أصل) ومن جدول الشدة الافتراضية لكل نوع هجوم</td></tr>
+<tr><td class="k">زمن الاستجابة</td><td>الفرق بين أول دليل ولحظة القرار، من الحوادث الحية فقط</td></tr>
+<tr><td class="k">حي أو replay</td><td>موسوم على كل حادثة، ولا يُخلط بينهما في أي رقم</td></tr>
 </tbody></table>
-<p class="note">أي من الخيارين 2 و3 يغيّر قاعدة أمان مثبّتة ويحتاج قرارًا صريحًا من المالك قبل التنفيذ.</p>
+</div>
 </section>
 
 </body>

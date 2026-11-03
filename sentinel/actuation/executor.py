@@ -72,7 +72,7 @@ class Executor:
         outcome = decision.outcome.value
         if source == "auto" and outcome not in ("auto_act", "auto_throttle"):
             return None
-        if source == "approved" and outcome != "auto_act":
+        if source in ("approved", "deadline") and outcome != "auto_act":
             return None                       # denied/timed out => notify only
         with self._lock:
             return self._handle(decision, ctx, source, rec, outcome, case_id)
@@ -133,7 +133,7 @@ class Executor:
         incident = ctx.get("incident_id", decision.incident_id)
         tag = f"{source}:{incident}"
 
-        need = 2 if source == "auto" else 1
+        need = 2 if source in ("auto", "deadline") else 1
         level = int(self._level())
         if level < need:
             return self._record(

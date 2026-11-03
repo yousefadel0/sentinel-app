@@ -30,6 +30,8 @@ TOP_LEVEL_KEYS = (
     "limits",
     "ops_ui",  # M7 module block; validated here since it is part of §8 schema
     "audit_store",  # M6 (D5): optional SQLite append-only audit store path
+    "policy",  # P1: optional decision thresholds
+    "critical_response",  # P2: urgent escalation with a deadline
     "notifiers",  # Phase 5: optional outbound notification channels
     "siem",  # M8 (PHASE-2): optional SIEM dual-role plane connector block
 )
@@ -48,6 +50,25 @@ SCHEMA: dict[str, dict] = {
                         "ip": {"type": str, "required": True,
                                "constraints": {"ipv4": True}},
                         "hostname": {"type": str, "required": True},
+                        # default "critical"; G1 allowlist members
+                        "criticality": {"type": str, "required": False,
+                                        "constraints": {"enum": (
+                                            "critical", "high", "medium", "low")}},
+                    }
+                },
+            },
+            # Important assets that are NOT G1-protected (weights the score only).
+            "assets": {
+                "type": list,
+                "required": False,
+                "constraints": {
+                    "item_keys": {
+                        "ip": {"type": str, "required": True,
+                               "constraints": {"ipv4": True}},
+                        "hostname": {"type": str, "required": True},
+                        "criticality": {"type": str, "required": True,
+                                        "constraints": {"enum": (
+                                            "critical", "high", "medium", "low")}},
                     }
                 },
             },
@@ -92,6 +113,14 @@ SCHEMA: dict[str, dict] = {
                           "constraints": {"min": 1}},
             "hard_cutoff_s": {"type": int, "required": True,
                               "constraints": {"min": 1}},
+            # Own model: raw (default) or OpenAI-compatible chat completions.
+            "api_style": {"type": str, "required": False,
+                          "constraints": {"enum": ("raw", "openai")}},
+            "model": {"type": str, "required": False,
+                      "constraints": {"cond_req": ("api_style", "openai"),
+                                      "min_len": 1}},
+            "api_key_env": {"type": str, "required": False,
+                            "constraints": {"min_len": 1}},
         },
     },
     "actuators": {
@@ -151,6 +180,32 @@ SCHEMA: dict[str, dict] = {
         "keys": {
             "path": {"type": str, "required": True,
                      "constraints": {"min_len": 1}},
+        },
+    },
+    "policy": {
+        # P1: decision thresholds. >= auto_act_threshold may act alone;
+        # between human_approval_threshold and it needs a human; below: log.
+        "type": dict,
+        "required": False,
+        "keys": {
+            "auto_act_threshold": {"type": (int, float), "required": False,
+                                   "constraints": {"min": 0.5, "max": 1.0}},
+            "human_approval_threshold": {"type": (int, float), "required": False,
+                                         "constraints": {"min": 0.1, "max": 1.0}},
+        },
+    },
+    "critical_response": {
+        "type": dict,
+        "required": False,
+        "keys": {
+            "enabled": {"type": bool, "required": True},
+            "min_score": {"type": (int, float), "required": False,
+                          "constraints": {"min": 0.5, "max": 1.0}},
+            "deadline_minutes": {"type": int, "required": False,
+                                 "constraints": {"min": 5, "max": 60}},
+            "auto_remediate_on_timeout": {"type": bool, "required": False},
+            "reminder_minutes": {"type": int, "required": False,
+                                 "constraints": {"min": 1, "max": 30}},
         },
     },
     "notifiers": {
@@ -221,6 +276,8 @@ SCHEMA: dict[str, dict] = {
 }
 
 CROSS_FIELD_RULES = (
+    ("policy.human_approval_threshold", "<=", "policy.auto_act_threshold",
+     "approval threshold must not exceed the auto-act threshold"),
     ("brain.hard_cutoff_s", "<=", "brain.timeout_s",
      "hard cutoff must be <= timeout"),
     ("limits.max_blocks_per_hour", ">=", "limits.max_blocks_per_min",

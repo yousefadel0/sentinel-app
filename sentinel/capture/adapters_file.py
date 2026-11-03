@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sentinel.capture.eve_parser import iter_eve
+from sentinel.capture.confidence import suricata_confidence
 from sentinel.capture.health import CaptureHealthTracker
 from sentinel.capture.normalizer import normalize
 from sentinel.capture.zeek_logs import iter_zeek
@@ -105,8 +106,7 @@ class EveFileDataSource(DataSource):
                     vlan=self._vlan,
                     asset_hint=hint,
                     signals=signals,
-                    confidence_raw=float(raw.get("alert", {}).get("confidence", 0.5))
-                    if isinstance(raw.get("alert"), dict) else 0.5,
+                    confidence_raw=suricata_confidence(raw),
                 )
                 alerts.append(alert)
                 self._tracker.record_alert(ts=alert.ts or None)

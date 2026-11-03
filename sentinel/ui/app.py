@@ -81,7 +81,8 @@ _SHELL = """<!doctype html>
 def create_app(cfg: dict, engine=None, store: Store | None = None,
                capture_dir: Path | None = None,
                report_dir: Path | None = None,
-               on_resolved=None) -> FastAPI:
+               on_resolved=None, on_ack=None,
+               critical_status=None) -> FastAPI:
     """Build the ops UI app from a VALIDATED config.
 
     Fail-closed rules enforced here at construction time:
@@ -107,6 +108,8 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     app.state.report_dir = Path(report_dir or "reports")
     app.state.port = port
     app.state.on_resolved = on_resolved
+    app.state.on_ack = on_ack
+    app.state.critical_status = critical_status
 
     static_dir = Path(__file__).parent / "static"
     # DP2: mount ONLY the vendored file directory; every file in it must
@@ -296,12 +299,12 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                                        "daemon_fresh": fresh}))
 
     @app.get("/ui/overview", response_class=HTMLResponse)
-    def ui_overview(request: Request) -> HTMLResponse:
+    def ui_overview(request: Request, origin: str = "") -> HTMLResponse:
         _guard(request)
         store = _store_or_note()
         if store is None:
             return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
-        ov = analytics.overview(store)
+        ov = analytics.overview(store, origin=origin)
         level = int((cfg.get("autonomy_level", 0)) or 0)
         return _page(pages.overview(
             ov, analytics.autonomy_readiness(ov, level), views.kpis(store),
@@ -311,7 +314,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     def ui_incidents(request: Request, outcome: str = "", tier: str = "",
                      attack_type: str = "", ip: str = "", q: str = "",
                      label: str = "", min_score: str = "",
-                     page: int = 1) -> HTMLResponse:
+                     origin: str = "", page: int = 1) -> HTMLResponse:
         _guard(request)
         store = _store_or_note()
         if store is None:
@@ -322,10 +325,11 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             ms = None
         f = {"outcome": outcome, "tier": tier, "attack_type": attack_type,
              "ip": ip.strip(), "q": q.strip(), "label": label,
-             "min_score": min_score.strip()}
+             "min_score": min_score.strip(), "origin": origin}
         listing = analytics.incident_list(
             store, outcome=outcome, tier=tier, attack_type=attack_type,
-            ip=f["ip"], q=f["q"], label=label, min_score=ms, page=page)
+            ip=f["ip"], q=f["q"], label=label, min_score=ms,
+            origin=origin, page=page)
         return _page(pages.incidents(listing, f))
 
     @app.get("/ui/incident/{incident_id}", response_class=HTMLResponse)
@@ -362,6 +366,21 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         return _page(pages.incident_detail(
             analytics.incident_full(store, incident_id), True))
 
+    @app.post("/approvals/{approval_id}/ack", response_class=HTMLResponse)
+    def ack_critical(approval_id: str, request: Request) -> HTMLResponse:
+        """'I am handling it': stops the automatic deadline action for a
+        critical case. Recorded by the escalation watch; changes no decision."""
+        _guard(request)
+        if app.state.on_ack is None:
+            raise HTTPException(status_code=409, detail=(
+                "no escalation watch attached (run the live daemon with "
+                "critical_response enabled)"))
+        if not app.state.on_ack(approval_id):
+            raise HTTPException(status_code=404, detail=(
+                "no open critical case with that id, or already acknowledged"))
+        log.info("critical_ack", approval_id=approval_id)
+        return HTMLResponse('<p class="empty">تم تسجيل الاستلام: لن يتصرف النظام تلقائيًا في هذه الحالة.</p>')
+
     @app.get("/ui/approvals", response_class=HTMLResponse)
     def ui_approvals(request: Request) -> HTMLResponse:
         _guard(request)
@@ -381,8 +400,12 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                            "SELECT ts, incident_id, outcome, case_id FROM decisions"
                            " WHERE case_id IN ('ops_ui','telegram')"
                            " ORDER BY id DESC LIMIT 25")]
+        cs = app.state.critical_status
+        for p in pending:
+            p["watch"] = cs(p["approval_id"]) if (cs and p.get("critical")) else None
         return _page(pages.approvals(pending, history,
-                                     app.state.engine is not None))
+                                     app.state.engine is not None,
+                                     can_ack=app.state.on_ack is not None))
 
     @app.get("/ui/sources", response_class=HTMLResponse)
     def ui_sources(request: Request) -> HTMLResponse:
@@ -431,11 +454,13 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
 def serve(cfg: dict, engine=None, store: Store | None = None,
           capture_dir: Path | None = None,
           report_dir: Path | None = None,
-          on_resolved=None) -> None:
+          on_resolved=None, on_ack=None,
+          critical_status=None) -> None:
     """Blocking uvicorn run bound to the validated loopback host:port."""
     import uvicorn
     ui_cfg = cfg["ops_ui"]
     host = ui_cfg["bind"].rsplit(":", 1)[0].strip("[]")
     app = create_app(cfg, engine=engine, store=store, capture_dir=capture_dir,
-                     report_dir=report_dir, on_resolved=on_resolved)
+                     report_dir=report_dir, on_resolved=on_resolved,
+                     on_ack=on_ack, critical_status=critical_status)
     uvicorn.run(app, host=host, port=app.state.port, log_level="warning")

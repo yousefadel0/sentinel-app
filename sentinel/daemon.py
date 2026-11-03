@@ -30,6 +30,7 @@ from sentinel.contracts.datasource import DataSource
 from sentinel.correlator import Correlator
 from sentinel.correlator.correlator import DEFAULT_CORRELATION_WINDOW_S, _parse_ts
 from sentinel.actuation import Executor
+from sentinel.escalation import CriticalWatch
 from sentinel.decision import AutonomyController, DecisionEngine, RateLimiter
 from sentinel.decision.chain import Facts
 from sentinel.detectors import DetectorSuite
@@ -148,7 +149,9 @@ class Daemon:
                  hub=None, exporter=None, approvals=None,
                  export_every_s: float = 10.0,
                  metrics_path: Path | None = None,
-                 executor: Executor | None = None) -> None:
+                 executor: Executor | None = None,
+                 watch: CriticalWatch | None = None) -> None:
+        self._watch = watch
         self._executor = executor
         self._metrics_path = Path(metrics_path) if metrics_path else None
         self._hub, self._exporter = hub, exporter
@@ -200,6 +203,8 @@ class Daemon:
             self._decided[key] = (sigs, n)
             made += 1
         self._apply_resolutions()
+        if self._watch is not None:
+            self._watch.tick()
         if self._executor is not None:
             self._executor.sweep()
         self._export()
@@ -233,10 +238,14 @@ class Daemon:
         decision = self._engine.evaluate(incident, Facts(liveness="alive"))
         self._record(decision, "live")
         self._record_context(incident)
+        self._store.record_incident_inputs(incident_id=decision.incident_id,
+                                           inputs=dict(decision.inputs))
+        ctx = {"incident_id": decision.incident_id,
+               "src_ip": incident.src_ip, "dst_ip": incident.dst_ip}
         if self._executor is not None:
-            self._executor.handle(decision, {
-                "incident_id": decision.incident_id,
-                "src_ip": incident.src_ip, "dst_ip": incident.dst_ip}, "auto")
+            self._executor.handle(decision, ctx, "auto")
+        if self._watch is not None:
+            self._watch.consider(decision, ctx)
         if self._hub is not None:
             self._hub.notify(decision, incident)
         if (self._triage is not None
@@ -264,7 +273,16 @@ class Daemon:
 
     def execute_approved(self, decision) -> None:
         """Callback for the Ops UI approval route (same seam as chat)."""
+        if self._watch is not None:
+            self._watch.resolved(decision.incident_id)
         self._enforce_approved(decision, "ops_ui")
+
+    def critical_status(self, incident_id: str):
+        return self._watch.status(incident_id) if self._watch else None
+
+    def acknowledge(self, incident_id: str, actor: str = "ops_ui") -> bool:
+        """Callback for the Ops UI 'I am handling it' button."""
+        return bool(self._watch and self._watch.ack(incident_id, actor))
 
     def _record_context(self, incident) -> None:
         """Persist who/what/where so the Ops UI can filter and explain."""
@@ -303,10 +321,16 @@ class Daemon:
                 approval_id, approved = self._resolutions.get_nowait()
             except queue.Empty:
                 return
+            if approved is None:         # /ack: engineer is handling it
+                if self._watch is not None:
+                    self._watch.ack(approval_id, "telegram")
+                continue
             try:
                 decision = self._engine.resolve(approval_id, approved)
             except KeyError:
                 continue                 # stale/unknown id: nothing to do
+            if self._watch is not None:
+                self._watch.resolved(approval_id)
             self._record(decision, "telegram")
             self._enforce_approved(decision, "telegram")
             log.info("chat_approval_resolved", approval_id=approval_id,
@@ -477,18 +501,23 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                 token_env=outbound.get("token_env"),
                 batch_size=int(outbound["batch_size"]))
     triage = None
-    brain = cfg.get("brain") or {}
-    env_var = brain.get("llm_endpoint_env")
-    if env_var and os.environ.get(env_var):
-        from sentinel.brain.client import LLMClient
-        triage = AdvisoryTriage(LLMClient(
-            env_var, timeout_s=int(brain["timeout_s"]),
-            hard_cutoff_s=int(brain["hard_cutoff_s"])))
-    return Daemon(sources=sources, engine=engine, store=store,
+    from sentinel.brain.client import llm_client_from_cfg
+    client = llm_client_from_cfg(cfg)
+    if client is not None:
+        triage = AdvisoryTriage(client)
+    cr = cfg.get("critical_response") or {}
+    daemon = Daemon(sources=sources, engine=engine, store=store,
                   health_path=capture_dir / "live-health.json",
                   triage=triage, hub=hub, exporter=exporter,
                   approvals=approvals, executor=executor,
                   metrics_path=capture_dir / "sentinel.prom")
+    if cr.get("enabled"):
+        daemon._watch = CriticalWatch(
+            store=store, engine=engine, hub=hub, executor=executor,
+            clock=_utcnow, record_decision=daemon._record,
+            auto_remediate=bool(cr.get("auto_remediate_on_timeout", True)),
+            reminder_s=int(cr.get("reminder_minutes", 5)) * 60)
+    return daemon
 
 
 def _build_notifiers(cfg: dict):

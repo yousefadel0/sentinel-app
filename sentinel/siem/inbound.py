@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from sentinel.capture.live import _LiveBase
+from sentinel.capture.confidence import wazuh_confidence
 from sentinel.capture.normalizer import normalize
 from sentinel.capture.tail import OffsetStore
 from sentinel.models import Alert
@@ -66,7 +67,8 @@ class WazuhAlertsFileDataSource(_LiveBase):
             alert = normalize(raw, adapter=ADAPTER,
                               ref=f"{self._path.name}#{first + i}",
                               signals=("auth_fail_burst",),
-                              confidence_raw=0.6)
+                              confidence_raw=wazuh_confidence(
+                                  (rule or {}).get("level")))
             out.append(alert)
             self._record_alert(alert)
         return out

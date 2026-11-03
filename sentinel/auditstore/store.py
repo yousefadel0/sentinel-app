@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS incident_context (
     evidence    TEXT NOT NULL DEFAULT '[]',
     mitre       TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS incident_inputs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    inputs      TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS analyst_notes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          TEXT NOT NULL,
@@ -116,12 +122,12 @@ CREATE TABLE IF NOT EXISTS kpis_events (
 #: store file itself, not by caller discipline.
 _IMMUTABLE_TABLES = ("meta", "decisions", "llm_pairs", "actions",
                      "rollbacks", "kpis_events", "incident_context",
-                     "analyst_notes", "audit_chain")
+                     "incident_inputs", "analyst_notes", "audit_chain")
 
 #: Tables whose rows are covered by the tamper-evidence hash chain.
 _CHAINED_TABLES = ("meta", "decisions", "llm_pairs", "actions",
                    "rollbacks", "kpis_events", "incident_context",
-                   "analyst_notes")
+                   "incident_inputs", "analyst_notes")
 GENESIS_HASH = "0" * 64
 
 
@@ -255,6 +261,16 @@ class Store:
              json.dumps(signals), alert_count, first_ts, last_ts,
              json.dumps(evidence[:50]), json.dumps(mitre)))
         return self._commit_chained("incident_context", int(cur.lastrowid))
+
+    def record_incident_inputs(self, *, incident_id: str,
+                               inputs: dict[str, Any]) -> int:
+        """The numbers behind a score (confidence per source, criticality,
+        severity, penalties) so the UI can explain it later."""
+        cur = self._conn.execute(
+            "INSERT INTO incident_inputs (ts, incident_id, inputs)"
+            " VALUES (?,?,?)",
+            (_utc_now_iso(), incident_id, json.dumps(inputs, sort_keys=True)))
+        return self._commit_chained("incident_inputs", int(cur.lastrowid))
 
     def record_analyst_note(self, *, incident_id: str, actor: str,
                             label: str = "", note: str = "") -> int:

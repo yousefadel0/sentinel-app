@@ -77,6 +77,7 @@ class Decision:
     recommendation: Recommendation | None
     approval_deadline: datetime | None = None   # set iff HUMAN_APPROVAL (= now+900s)
     would: str = ""                       # "would do X because Y" phrase
+    inputs: dict = field(default_factory=dict)  # score inputs, for explanation
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.score <= 1.0 or not 0.0 <= self.base_score <= 1.0:

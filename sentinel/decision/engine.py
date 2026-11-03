@@ -60,6 +60,10 @@ class ConfigView:
     max_blocks_per_min: int
     max_blocks_per_hour: int
     autonomy_level: int
+    auto_threshold: float = 0.90     # unit-test default; configs pass policy
+    human_threshold: float = 0.70
+    critical_min_score: float = 2.0  # > 1.0 = no critical class (default off)
+    critical_window_s: int = APPROVAL_WINDOW_S
 
 
 class _IncidentLike(Protocol):
@@ -93,6 +97,50 @@ class DecisionEngine:
         self._ids = itertools.count(1)
 
     # ------------------------------------------------------------------ #
+    def _band(self, score: float) -> str:
+        if score >= self._cfg.auto_threshold:
+            return "auto"
+        if score >= self._cfg.human_threshold:
+            return "human"
+        return "log_only"
+
+    @staticmethod
+    def _g1_target(incident, attack_type: AttackType) -> str:
+        """G1 judges the TARGET OF THE ACTION, not the victim: blocking a
+        brute-force attacker targets the source address; quarantining for C2
+        targets the destination. Falls back to dst when src is unknown."""
+        from sentinel.decision.playbooks import PLAYBOOKS
+        want = PLAYBOOKS[attack_type.value][1].get("target")
+        src = getattr(incident, "src_ip", None)
+        if want == "src" and src:
+            return src
+        return incident.dst_ip
+
+    # ------------------------------------------------------------------ #
+    #: Adapters whose alerts are ATTACK EVIDENCE (raw flow records are not).
+    EVIDENCE_ADAPTERS = frozenset({"eve_json", "behavioral", "wazuh_inbound",
+                                   "zeek_notice"})
+
+    @classmethod
+    def _combined_confidence(cls, alerts) -> tuple[float, dict]:
+        """Strongest single source, boosted when INDEPENDENT sources agree.
+
+        Per evidence adapter the best alert wins; with two or more adapters
+        the result is noisy-OR (1 - prod(1 - c)), never below the strongest
+        one and capped at 0.99. A single adapter keeps the old max() rule.
+        """
+        from sentinel.capture.confidence import noisy_or
+        per: dict[str, float] = {}
+        for a in alerts:
+            name = a.source.adapter
+            if name in cls.EVIDENCE_ADAPTERS:
+                per[name] = max(per.get(name, 0.0), a.confidence_raw)
+        overall = max(a.confidence_raw for a in alerts)
+        if len(per) >= 2:
+            overall = max(overall, noisy_or(list(per.values())))
+        return min(0.99, overall) if len(per) >= 2 else overall, per
+
+    # ------------------------------------------------------------------ #
     def _incident_inputs(
         self,
         incident: _IncidentLike,
@@ -110,7 +158,8 @@ class DecisionEngine:
         alerts = list(incident.alerts)
         if not alerts:
             raise ValueError("incident has no alerts")
-        confidence = max(a.confidence_raw for a in alerts)
+        confidence, conf_by_source = self._combined_confidence(alerts)
+        self._last_conf_sources = conf_by_source
         criticality = max(
             ((a.asset_hint.criticality or "low") for a in alerts),
             key=lambda c: CRITICALITY_WEIGHTS[c],
@@ -246,7 +295,8 @@ class DecisionEngine:
         base_rec = recommend(attack_type)
         if outcome is Outcome.LOG_ONLY:
             return None, (
-                f"would log only because score fell below the 0.70 band; "
+                f"would log only because score fell below the "
+                f"{self._cfg.human_threshold:.2f} band; "
                 f"playbook {base_rec.action} not proposed"
             )
         if outcome is Outcome.NOTIFY_ONLY:
@@ -296,7 +346,7 @@ class DecisionEngine:
                                    for v in vlans))
         deltas, pre_events, fired_pre = self._run_pre_band(facts)
         score = apply_penalties(base, deltas)          # D1: clamp BEFORE banding
-        banded = band_of(score)
+        banded = self._band(score)
 
         outcome = {
             "auto": Outcome.AUTO_ACT,
@@ -326,7 +376,8 @@ class DecisionEngine:
 
         # ---- §3.1 post-band chain --------------------------------------- #
         chained_outcome, action, post_events, chain_cap = self._run_post_band(
-            facts, incident.dst_ip, playbook_action, action, outcome,
+            facts, self._g1_target(incident, attack_type), playbook_action,
+            action, outcome,
             fired_pre)
         if chain_cap is not None:
             cap_applied = chain_cap
@@ -345,8 +396,12 @@ class DecisionEngine:
             attack_type, chained_outcome, action, cap_applied)
 
         deadline = None
+        is_critical = (chained_outcome is Outcome.HUMAN_APPROVAL
+                       and score >= self._cfg.critical_min_score)
         if chained_outcome is Outcome.HUMAN_APPROVAL:
-            deadline = now + timedelta(seconds=APPROVAL_WINDOW_S)
+            window = (self._cfg.critical_window_s if is_critical
+                      else APPROVAL_WINDOW_S)
+            deadline = now + timedelta(seconds=window)
 
         decision = Decision(
             incident_id=incident.incident_id,
@@ -359,6 +414,15 @@ class DecisionEngine:
             recommendation=recommendation,
             approval_deadline=deadline,
             would=would,
+            inputs={
+                "confidence": round(conf, 4),
+                "confidence_sources": {k: round(v, 4) for k, v in
+                                       getattr(self, "_last_conf_sources", {}).items()},
+                "criticality": crit, "severity": sev,
+                "attack_type": attack_type.value,
+                "penalties": [round(d, 3) for d in deltas],
+                "critical": bool(is_critical),
+            },
         )
         if chained_outcome is Outcome.HUMAN_APPROVAL:
             self._pending[incident.incident_id] = decision
@@ -374,7 +438,8 @@ class DecisionEngine:
         """
         return dict(self._pending)
 
-    def resolve(self, approval_id: str, approved: bool) -> Decision:
+    def resolve(self, approval_id: str, approved: bool, *,
+                by_deadline: bool = False) -> Decision:
         """Resolve a pending human approval against the INJECTED clock.
 
         After the 15-minute window the verdict degrades to notify_only with
@@ -388,7 +453,12 @@ class DecisionEngine:
             raise KeyError(f"no pending approval {approval_id!r}") from None
         now = self._clock()
         assert original.approval_deadline is not None  # invariant of creation
-        if now > original.approval_deadline:
+        if by_deadline:
+            # Critical-incident deadline reached with nobody acting: the
+            # caller (escalation.CriticalWatch) takes responsibility; every
+            # downstream gate (validator, G1, TTL, caps) still applies.
+            outcome, event_name = Outcome.AUTO_ACT, "critical_deadline_auto_action"
+        elif now > original.approval_deadline:
             outcome, event_name = Outcome.NOTIFY_ONLY, "human_approval_timeout"
         elif approved:
             outcome, event_name = Outcome.AUTO_ACT, "human_approval_granted"

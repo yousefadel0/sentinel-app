@@ -22,7 +22,7 @@ from sentinel.logging_setup import get_logger
 log = get_logger("sentinel.notify.approvals")
 
 Fetch = Callable[[str, float], dict]
-_CMD = re.compile(r"^/(approve|deny)(?:@\w+)?\s+([A-Za-z0-9_.:-]{1,128})\s*$")
+_CMD = re.compile(r"^/(approve|deny|ack)(?:@\w+)?\s+([A-Za-z0-9_.:-]{1,128})\s*$")
 
 
 def _urllib_fetch(url: str, timeout: float) -> dict:
@@ -43,7 +43,7 @@ class TelegramApprovals:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
-    def poll_once(self) -> list[tuple[str, bool]]:
+    def poll_once(self) -> list[tuple[str, "bool | None"]]:
         token = os.environ.get(self._env)
         if not token:
             return []
@@ -58,7 +58,9 @@ class TelegramApprovals:
                 continue                         # other chats have no authority
             m = _CMD.match(str(msg.get("text", "")).strip())
             if m:
-                out.append((m.group(2), m.group(1) == "approve"))
+                # approve -> True, deny -> False, ack -> None (acknowledge only)
+                out.append((m.group(2),
+                            None if m.group(1) == "ack" else m.group(1) == "approve"))
         return out
 
     def start(self, sink: "queue.Queue[tuple[str, bool]]") -> None:

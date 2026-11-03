@@ -30,3 +30,6 @@ htmlcov/
 *.zip
 *.sqlite
 *.sqlite3
+
+/config.yaml
+.sentinel-token
