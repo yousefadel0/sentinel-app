@@ -349,3 +349,16 @@ VICTIM (`dst`), so brute force on a critical server escalates to a human instead
 of blocking the attacker. Net: today only the DDoS playbook can lead to an
 executed action; the others are alert/escalate-only. This is a guardrail and
 scoring policy choice, so it is deliberately unchanged here.
+
+## Starting the Ops UI (recommended launcher)
+
+```powershell
+python -m sentinel --config pilot_config.yaml ui
+```
+
+`sentinel ui` checks everything that commonly breaks the launch and says which
+one failed: missing `[ops-ui]` extra, missing `ops_ui` block (safe defaults are
+used), unset token (a random one is generated and printed for that run), port
+already in use, port outside `ops_ui.allowed_ports`, audit store not found. It
+serves over the existing audit store in observer mode; use
+`sentinel run --ui` instead when the live daemon should be attached (approvals).

@@ -51,6 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
     val = cfg_sub.add_parser("validate", help="strictly validate a config file")
     val.add_argument("path", metavar="PATH", help="path to config.yaml")
 
+    ui = sub.add_parser(
+        "ui", help="serve the Ops UI over an existing audit store (observer)")
+    ui.add_argument("--store", metavar="SQLITE", default=None,
+                    help="audit store (default: audit_store.path or "
+                         "capture/audit.sqlite)")
+    ui.add_argument("--capture-dir", default="capture", metavar="DIR")
+    ui.add_argument("--report-dir", default="reports", metavar="DIR")
+    ui.add_argument("--port", type=int, default=None,
+                    help="override the port (must be in ops_ui.allowed_ports)")
+
     run = sub.add_parser(
         "run", help="live SHADOW daemon: tail sensor logs, decide, audit")
     run.add_argument("--capture-dir", required=True, metavar="DIR",
@@ -85,6 +95,101 @@ def build_parser() -> argparse.ArgumentParser:
                       help="local cache path (default: data/attack/enterprise-attack.json)")
 
     return parser
+
+
+def _port_is_free(host: str, port: int) -> bool:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _run_ui(args) -> int:
+    """One-command Ops UI launcher with actionable errors for every common
+    failure (missing extra, missing ops_ui block, no token, busy port)."""
+    import os
+    import secrets
+    from pathlib import Path
+
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError as exc:
+        print(f"Ops UI dependencies are missing ({exc.name}).\n"
+              'Install them with:  python -m pip install -e ".[ops-ui]"',
+              file=sys.stderr)
+        return EXIT_FAIL
+    if not args.config:
+        print("sentinel ui: --config is required, e.g.\n"
+              "  python -m sentinel --config pilot_config.yaml ui",
+              file=sys.stderr)
+        return EXIT_FAIL
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as exc:
+        print(f"REFUSING — invalid config {args.config} (ref §8):\n{exc}",
+              file=sys.stderr)
+        return EXIT_FAIL
+
+    ui_cfg = dict(cfg.get("ops_ui") or {})
+    if not ui_cfg:
+        print("note: config has no ops_ui block; using the safe defaults "
+              "(127.0.0.1:8080, token in SENTINEL_OPS_UI_TOKEN).")
+    ui_cfg.setdefault("bind", "127.0.0.1:8080")
+    ui_cfg.setdefault("auth_token_env", "SENTINEL_OPS_UI_TOKEN")
+    ui_cfg.setdefault("allowed_ports", [8080])
+    ui_cfg["enabled"] = True
+    if args.port is not None:
+        ui_cfg["bind"] = f"{ui_cfg['bind'].rsplit(':', 1)[0]}:{args.port}"
+    cfg["ops_ui"] = ui_cfg
+
+    env = ui_cfg["auth_token_env"]
+    if not os.environ.get(env):
+        os.environ[env] = secrets.token_urlsafe(24)
+        print(f"{env} was not set, so a random token was generated for "
+              f"THIS run only:\n  {os.environ[env]}\n"
+              "Put exactly this value in your header rule "
+              "(X-Sentinel-Token) or set the variable yourself next time.")
+
+    host, _, port_txt = ui_cfg["bind"].rpartition(":")
+    host = host.strip("[]")
+    if not _port_is_free(host, int(port_txt)):
+        print(f"Port {port_txt} on {host} is already in use — an old Ops UI "
+              "is probably still running. Stop it (Ctrl+C in its window) or "
+              "pass --port with another allowed port.", file=sys.stderr)
+        return EXIT_FAIL
+
+    from sentinel.auditstore.store import Store
+    from sentinel.ui.app import create_app, serve
+
+    store_path = (args.store or (cfg.get("audit_store") or {}).get("path")
+                  or "capture/audit.sqlite")
+    if not Path(store_path).is_file():
+        print(f"Audit store not found: {store_path}\n"
+              "Pass --store PATH, or run the pilot/daemon first so it is "
+              "created.", file=sys.stderr)
+        return EXIT_FAIL
+    try:
+        create_app(cfg)                       # validates bind/token up front
+    except (RuntimeError, ValueError, ConfigError) as exc:
+        print(f"Ops UI refused to start: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    store = Store(store_path, check_same_thread=False)
+    print(f"Ops UI (observer mode, no engine) on http://{host}:{port_txt}/\n"
+          f"  audit store : {store_path}\n"
+          f"  send header : X-Sentinel-Token: <your token>\n"
+          "  stop with Ctrl+C")
+    try:
+        serve(cfg, store=store, capture_dir=Path(args.capture_dir),
+              report_dir=Path(args.report_dir))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        store.close()
+    return EXIT_OK
 
 
 def _run_daemon(args) -> int:
@@ -197,6 +302,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return _run_daemon(args)
+
+    if args.command == "ui":
+        return _run_ui(args)
 
     # Boot check mode: --config given -> load+validate, report, exit 0/1.
     if args.config:
