@@ -7,15 +7,20 @@ from MITRE's official public STIX data when the catalog has been synced.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
 from typing import Any
 
+from sentinel.logging_setup import get_logger
+
 ATTACK_STIX_URL = (
     "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/"
     "master/enterprise-attack/enterprise-attack.json"
 )
+log = get_logger("sentinel.threatintel.attack")
 
 
 @dataclass(frozen=True)
@@ -144,3 +149,47 @@ def enrich_mapping(mapping: AttackMapping | None,
         "techniques": techniques,
         "catalog_source": catalog.get("source", "curated technique IDs; offline mode"),
     }
+
+
+class AttackIntel:
+    """Nonblocking, local ATT&CK lookup with a scheduled best-effort refresh."""
+
+    def __init__(self, path: str | Path, *, refresh_seconds: int = 86400,
+                 clock=None, sync=None) -> None:
+        self.path = Path(path)
+        self.refresh_seconds = max(3600, int(refresh_seconds))
+        self._clock = clock or time.time
+        self._sync = sync or sync_attack_catalog
+        self._catalog = load_attack_catalog(self.path)
+        self._attempted_at = 0.0
+        self._worker: threading.Thread | None = None
+
+    def match(self, signals: list[str] | tuple[str, ...]) -> dict[str, Any] | None:
+        """O(number of signals) lookup; no network or disk access on this path."""
+        mapping = map_incident(signals)
+        return enrich_mapping(mapping, self._catalog)
+
+    def maybe_refresh(self) -> None:
+        now = self._clock()
+        if self._worker is not None and self._worker.is_alive():
+            return
+        try:
+            age = now - self.path.stat().st_mtime
+        except OSError:
+            age = self.refresh_seconds
+        if age < self.refresh_seconds or now - self._attempted_at < self.refresh_seconds:
+            return
+        self._attempted_at = now
+        self._worker = threading.Thread(target=self._refresh, daemon=True,
+                                        name="attack-catalog-refresh")
+        self._worker.start()
+
+    def _refresh(self) -> None:
+        try:
+            self._sync(self.path)
+            catalog = load_attack_catalog(self.path)
+            if catalog:
+                self._catalog = catalog
+        except Exception as exc:
+            # Keep the last good cache or curated offline mapping.
+            log.warning("attack_catalog_refresh_failed", error=type(exc).__name__)

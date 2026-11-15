@@ -139,6 +139,9 @@ def _validate_list(path: str, data: Any, spec: dict, errors: list[str]) -> None:
                 f"{ipath}: expected item type {item_type.__name__}, "
                 f"got {type(item).__name__} {item!r} {REF}"
             )
+        elif item_type is not None and cons.get("item_constraints"):
+            _check_scalar(ipath, item, {"type": item_type,
+                                       "constraints": cons["item_constraints"]}, errors)
 
 
 def _validate_node(path: str, data: Any, spec: dict, errors: list[str]) -> None:
@@ -230,4 +233,31 @@ def load_config(path: str | Path) -> dict:
         raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"config: invalid YAML syntax in {p}: {exc} {REF}") from exc
+    if isinstance(raw, dict):
+        overlay = ui_override_path(raw)
+        if overlay is not None and overlay.is_file():
+            try:
+                changes = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+            except yaml.YAMLError as exc:
+                raise ConfigError(f"invalid UI settings file {overlay}: {exc}") from exc
+            if not isinstance(changes, dict) or set(changes) - {
+                    "site", "policy", "limits", "notifiers", "enforcement_dry_run"}:
+                raise ConfigError("invalid UI settings keys")
+            for key, value in changes.items():
+                if key == "site":
+                    if not isinstance(value, dict) or set(value) != {"protected_ips"}:
+                        raise ConfigError("UI settings may change only site.protected_ips")
+                    raw[key] = {**raw.get(key, {}), **value}
+                elif key in ("policy", "limits"):
+                    if not isinstance(value, dict):
+                        raise ConfigError(f"invalid UI settings {key}")
+                    raw[key] = {**raw.get(key, {}), **value}
+                else:
+                    raw[key] = value
     return validate_config(raw)
+
+
+def ui_override_path(raw: dict) -> Path | None:
+    """UI settings live beside the durable audit store, including in Docker."""
+    path = (raw.get("audit_store") or {}).get("path")
+    return Path(path).with_name("ui-settings.yaml") if isinstance(path, str) and path else None

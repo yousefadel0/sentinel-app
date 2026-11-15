@@ -37,6 +37,10 @@ PLAYBOOKS: dict[str, tuple[str, dict, str]] = {
         {"proposed_egress_rule": True},
         "dns tunneling suspected; notify plus proposed egress rule for human approval",
     ),
+    AttackType.BASELINE_ANOMALY.value: (
+        "notify_only", {},
+        "new traffic pattern against the persisted local baseline; review evidence",
+    ),
 }
 
 

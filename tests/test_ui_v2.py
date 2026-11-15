@@ -179,7 +179,9 @@ def test_audit_page_and_chain_verify(env):
 
 def test_sources_page_live_vs_replay(env):
     c, _, tmp = env
-    (tmp / "live-health.json").write_text(json.dumps({"sources": [
+    (tmp / "live-health.json").write_text(json.dumps({"mode": "live_shadow",
+        "enforcement": {"dry_run": True}, "notifications": {"channels": 0},
+        "sources": [
         {"source": "eve_json", "file": "eve.json", "status": "healthy",
          "source_type": "live_file", "packet_drops": 9}]}))
     html = c.get("/ui/sources", headers=H).text

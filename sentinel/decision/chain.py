@@ -78,6 +78,7 @@ class Facts:
     liveness: str = "unknown"             # alive | stale | unknown
     vlan_monitored: bool | None = None    # None -> derive from alerts+config
     src_private_outside_local: bool = False  # NAT step-1c predicate, precomputed
+    dry_run_simulation: bool = False  # show policy tier without live-flow proof
 
 
 @dataclass(frozen=True)

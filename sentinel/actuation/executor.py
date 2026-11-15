@@ -46,7 +46,9 @@ class Executor:
     def __init__(self, *, store, validator: Validator,
                  actuators: dict[str, Any], autonomy_level: Callable[[], int],
                  dry_run: bool = True, max_per_hour: int = 20,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 liveness_check: Callable[[dict], str] | None = None,
+                 can_act: Callable[[], bool] | None = None) -> None:
         self._store = store
         self._validator = validator
         self._actuators = dict(actuators)
@@ -54,6 +56,8 @@ class Executor:
         self.dry_run = bool(dry_run)
         self._max_per_hour = int(max_per_hour)
         self._clock = clock
+        self._liveness_check = liveness_check
+        self._can_act = can_act or (lambda: True)
         self._lock = threading.RLock()
         self._active: dict[tuple[str, str], dict] = {}   # (action, ip) -> info
         self._sent: deque = deque()
@@ -72,7 +76,9 @@ class Executor:
         outcome = decision.outcome.value
         if source == "auto" and outcome not in ("auto_act", "auto_throttle"):
             return None
-        if source in ("approved", "deadline") and outcome != "auto_act":
+        if source == "approved" and outcome != "auto_act":
+            return None
+        if source == "deadline" and outcome not in ("auto_act", "auto_throttle"):
             return None                       # denied/timed out => notify only
         with self._lock:
             return self._handle(decision, ctx, source, rec, outcome, case_id)
@@ -117,6 +123,24 @@ class Executor:
             return [dict(v, action=k[0], target=k[1])
                     for k, v in self._active.items()]
 
+    def rollback_one(self, action: str, target: str) -> bool:
+        """Undo one active response and append the actuator result to the audit log."""
+        with self._lock:
+            key = (action, target)
+            info = self._active.get(key)
+            if info is None:
+                return False
+            act = self._actuators.get(info["actuator"])
+            if act is None or not info.get("token"):
+                return False
+            res = act.rollback(info["token"])
+            self._store.record_rollback(case_id=info["case_id"],
+                                        token=info["token"], ok=bool(res.ok),
+                                        detail=f"operator rollback: {res.detail}")
+            if res.ok:
+                del self._active[key]
+            return bool(res.ok)
+
     # -- internals ------------------------------------------------------- #
 
     def _record(self, case_id, action, target, ttl, verdict, executed, detail):
@@ -132,6 +156,10 @@ class Executor:
         ttl = max(1, min(ttl, 60))                                   # G3
         incident = ctx.get("incident_id", decision.incident_id)
         tag = f"{source}:{incident}"
+
+        if not self._can_act():
+            return self._record(case_id, action_name, target, ttl, V_WITHHELD,
+                                False, f"{tag}: learning mode is observe-only")
 
         need = 2 if source in ("auto", "deadline") else 1
         level = int(self._level())
@@ -168,13 +196,28 @@ class Executor:
         if actuator is None:
             return self._record(case_id, action_name, target, ttl, V_NO_ACTUATOR,
                                 False, f"{tag}: no {name} actuator configured")
+        if action_name == _UPSTREAM and not getattr(actuator, "supports_rollback", False):
+            return self._record(case_id, action_name, target, ttl, V_REJECTED,
+                                False, f"{tag}: upstream actuator has no verified rollback contract")
 
         act = Action(type=atype or ActionType.NOTIFY_ONLY, target_ip=target,
                      ttl_minutes=ttl, rationale=rec.because,
                      params=dict(rec.params))
+        # Recheck at execution time: an earlier decision is not proof that
+        # the target flow is alive now. No checker means no enforcement.
+        try:
+            liveness = (self._liveness_check(ctx)
+                        if self._liveness_check is not None else "unknown")
+        except Exception:
+            liveness = "unknown"
+        if liveness not in ("alive", "stale", "unknown"):
+            liveness = "unknown"
+        if liveness != "alive":
+            return self._record(case_id, action_name, target, ttl, V_REJECTED,
+                                False, f"{tag}: current target liveness is {liveness}")
         try:
             verdict = self._validator.validate(
-                act, facts={"engine_outcome": outcome, "liveness": "alive"})
+                act, facts={"engine_outcome": outcome, "liveness": liveness})
         except ValidationError as exc:
             return self._record(case_id, action_name, target, ttl, V_REJECTED,
                                 False, f"{tag}: {exc}")

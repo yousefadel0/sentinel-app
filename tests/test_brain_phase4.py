@@ -151,9 +151,9 @@ def test_advisory_triage_records_pairs_without_touching_decisions(tmp_path, monk
     now = [base + timedelta(seconds=30)]
     d, store = _daemon(tmp_path, now)
     d._triage = AdvisoryTriage(LLMClient("M_ADV", transport=transport))
-    # a lone low-score scan is log_only; widen 'ambiguous' for this test
+    # Dry-run keeps the recommendation tier when liveness is unverified.
     monkeypatch.setattr("sentinel.daemon.AMBIGUOUS_OUTCOMES",
-                        frozenset({"log_only"}))
+                        frozenset({"log_only", "human_approval"}))
     _append(tmp_path / "eve.json", _eve("2026-10-20T08:00:01+0000"))
     d.run_once()
     before = store.rows("decisions")

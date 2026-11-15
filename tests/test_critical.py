@@ -13,6 +13,7 @@ import yaml
 from sentinel.actuation import Executor
 from sentinel.auditstore.store import Store
 from sentinel.decision.chain import Facts
+from sentinel.models import ConfidenceTier
 from sentinel.escalation import CriticalWatch
 from sentinel.notify.approvals import TelegramApprovals
 from sentinel.validator import Validator
@@ -50,17 +51,21 @@ class FakeLocked:
 
 
 def world(tmp_path, *, minutes=30, auto=True, level=2, dry_run=False,
-          min_score=0.70, reminder_s=300):
+          min_score=0.70, reminder_s=300, report_threshold=0.0,
+          fallback_actions=("throttle_src",)):
     clk = FakeClock()
     eng, _ = make_engine(cfg=config_view(critical_min_score=min_score,
                                          critical_window_s=minutes * 60,
-                                         auto_threshold=0.95), clock=clk)
+                                         auto_threshold=0.95,
+                                         report_threshold=report_threshold,
+                                         report_fallback_actions=fallback_actions), clock=clk)
     store = Store(tmp_path / "a.sqlite", check_same_thread=False)
     hub = FakeHub()
     acts = {"nftables_local": FakeActuator("nftables_local")}
     ex = Executor(store=store, validator=Validator(config_view()),
                   actuators=acts, autonomy_level=lambda: level,
-                  dry_run=dry_run, clock=lambda: clk().timestamp())
+                  dry_run=dry_run, clock=lambda: clk().timestamp(),
+                  liveness_check=lambda ctx: "alive")  # explicit test sensor
     recorded = []
     watch = CriticalWatch(store=store, engine=FakeLocked(eng), hub=hub,
                           executor=ex, clock=clk, auto_remediate=auto,
@@ -175,6 +180,75 @@ def test_deadline_action_still_obeys_autonomy_and_dry_run(tmp_path):
         store.close()
 
 
+def test_tier_c_critical_deadline_never_reaches_actuator(tmp_path):
+    eng, clk, store, hub, ex, acts, watch, recorded = world(
+        tmp_path, minutes=15, min_score=0.80)
+    inc = Inc([alert("auth_fail_burst", 1.0,
+                     tier=ConfidenceTier.C, crit="critical")])
+    decision = eng.evaluate(inc, Facts(liveness="alive"))
+    assert decision.outcome.value == "notify_only"
+    assert not watch.consider(decision, {"incident_id": decision.incident_id,
+                                        "src_ip": inc.src_ip,
+                                        "dst_ip": inc.dst_ip})
+    clk.advance(minutes=16)
+    assert watch.tick() == 0
+    assert not acts["nftables_local"].calls
+    assert not recorded
+    assert "critical_deadline_auto_action" not in audits(store)
+    store.close()
+
+
+def test_liveness_expires_before_deadline_action(tmp_path):
+    eng, clk, store, hub, ex, acts, watch, _ = world(tmp_path, minutes=15)
+    decision, ctx = critical_decision(eng)
+    assert watch.consider(decision, ctx)
+    ex._liveness_check = lambda ctx: "stale"
+    clk.advance(minutes=16)
+    assert watch.tick() == 0
+    assert not acts["nftables_local"].calls
+    assert "rejected_g6" in [r["verdict"] for r in store.rows("actions")]
+    assert "critical_deadline_action_withheld" in audits(store)
+    assert "critical_deadline_auto_action" not in audits(store)
+    assert "دون تنفيذ" in hub.sent[-1].title
+    store.close()
+
+
+def test_report_tier_waits_thirty_minutes_then_uses_safe_throttle(tmp_path):
+    eng, clk, store, hub, ex, acts, watch, _ = world(
+        tmp_path, minutes=15, min_score=0.80, report_threshold=0.5)
+    inc = Inc([alert("volume_spike", 0.6, crit="critical")])
+    decision = eng.evaluate(inc, Facts(liveness="alive"))
+    assert decision.outcome.value == "report_wait"
+    assert decision.approval_deadline == clk() + timedelta(minutes=30)
+    ctx = {"incident_id": decision.incident_id, "src_ip": inc.src_ip,
+           "dst_ip": inc.dst_ip}
+    assert watch.consider(decision, ctx)
+    clk.advance(minutes=29)
+    assert watch.tick() == 0 and not acts["nftables_local"].calls
+    clk.advance(minutes=2)
+    assert watch.tick() == 1
+    assert acts["nftables_local"].calls[0].type.value == "throttle_src"
+    assert acts["nftables_local"].calls[0].ttl_minutes == 15
+    store.close()
+
+
+def test_report_timeout_executes_configured_ordered_protective_plan(tmp_path):
+    eng, clk, store, _, _, acts, watch, _ = world(
+        tmp_path, report_threshold=0.5,
+        fallback_actions=("throttle_src", "block_ip_temp"))
+    inc = Inc([alert("auth_fail_burst", 0.6, crit="critical")])
+    decision = eng.evaluate(inc, Facts(liveness="alive"))
+    assert decision.outcome.value == "report_wait"
+    assert watch.consider(decision, {"incident_id": decision.incident_id,
+                                    "src_ip": inc.src_ip, "dst_ip": inc.dst_ip})
+    clk.advance(minutes=31)
+    assert watch.tick() == 2
+    assert [a.type.value for a in acts["nftables_local"].calls] == [
+        "throttle_src", "block_ip_temp"]
+    assert store.verify_chain()["ok"]
+    store.close()
+
+
 def test_human_decision_before_the_deadline_cancels_auto_action(tmp_path):
     eng, clk, store, hub, ex, acts, watch, rec = world(tmp_path, minutes=15)
     d, ctx = critical_decision(eng)
@@ -261,7 +335,8 @@ def test_daemon_end_to_end_critical_ddos_with_no_engineer(tmp_path):
         cp = tmp_path / "c.yaml"
         cp.write_text(yaml.safe_dump(cfg))
         store = Store(tmp_path / "a.sqlite")
-        d = build_daemon(load_config(cp), tmp_path, store, dry_run=False)
+        d = build_daemon(load_config(cp), tmp_path, store, dry_run=False,
+                         liveness_check=lambda ctx: "alive")  # test sensor
         now = [datetime.now(timezone.utc)]
         d._clock = lambda: now[0]
         d._engine._engine._clock = lambda: now[0]
@@ -281,12 +356,12 @@ def test_daemon_end_to_end_critical_ddos_with_no_engineer(tmp_path):
         assert hub.sent and "10.0.0.4" in hub.sent[0].body and _Soar.got == []
         now[0] += timedelta(minutes=16)                  # nobody answers
         d.run_once()
-        assert _Soar.got and _Soar.got[0]["action"] == "recommend_upstream_mitigation"
-        assert _Soar.got[0]["target_ip"] == "10.0.0.4"
+        assert _Soar.got == []  # no verified upstream rollback contract
         cases = [r["case_id"] for r in store.rows("decisions")]
         assert cases == ["live", "deadline"]
-        act = [r for r in store.rows("actions") if r["verdict"] == "executed"]
-        assert act and act[0]["case_id"] == "deadline"
+        act = [r for r in store.rows("actions") if r["action_type"] == "recommend_upstream_mitigation"]
+        assert act and act[0]["verdict"] == "rejected_g6"
+        assert act[0]["case_id"] == "deadline"
         assert store.verify_chain()["ok"]
         store.close()
     finally:

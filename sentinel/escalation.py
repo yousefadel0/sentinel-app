@@ -21,6 +21,7 @@ Those get the urgent message and stay human-only; G1 has no exceptions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -61,9 +62,7 @@ class CriticalWatch:
 
     def consider(self, decision, ctx: dict) -> bool:
         """Open an escalation if ``decision`` is critical. True if opened."""
-        if decision.outcome.value != "human_approval":
-            return False
-        if not (decision.inputs or {}).get("critical"):
+        if decision.outcome.value not in ("human_approval", "report_wait"):
             return False
         deadline = decision.approval_deadline
         if deadline is None or decision.incident_id in self._open:
@@ -118,8 +117,7 @@ class CriticalWatch:
                 continue
             if now >= case.deadline:
                 if self._auto and not case.acked_by:
-                    self._deadline_action(iid, case)
-                    taken += 1
+                    taken += int(self._deadline_action(iid, case))
                 else:
                     why = ("acknowledged by " + case.acked_by) if case.acked_by \
                         else "automatic action disabled"
@@ -137,27 +135,48 @@ class CriticalWatch:
 
     # -- internals --------------------------------------------------------------- #
 
-    def _deadline_action(self, iid: str, case: _Case) -> None:
+    def _deadline_action(self, iid: str, case: _Case) -> int:
         self._open.pop(iid, None)
         try:
-            decision = self._engine.resolve(iid, True, by_deadline=True)
+            decision = self._engine.resolve(iid, True, by_deadline=True,
+                                            actor="sentinel_timeout")
         except KeyError:
-            return
+            return False
         if self._record_decision is not None:
             self._record_decision(decision, "deadline")
-        verdict = None
+        if decision.outcome.value not in ("auto_act", "auto_throttle"):
+            self._audit(iid, "critical_deadline_passed",
+                        "Tier C cannot be acted on automatically")
+            self._notify_text(
+                decision, case, "انتهت المهلة دون تنفيذ تلقائي",
+                "انتهت المهلة، لكن فئة الدليل C تمنع التنفيذ التلقائي. راجع الحالة يدويًا.")
+            return False
+        verdicts = []
         if self._executor is not None:
-            verdict = self._executor.handle(
-                decision, dict(case.ctx, incident_id=iid), "deadline",
-                case_id="deadline")
-        self.auto_actions += 1
-        self._audit(iid, "critical_deadline_auto_action",
-                    f"executor verdict: {verdict}")
-        log.warning("critical_deadline_auto_action", incident_id=iid,
-                    verdict=verdict)
+            from sentinel.decision.models import Recommendation
+            actions = (decision.inputs or {}).get("fallback_actions") or []
+            plans = [decision]
+            for action in actions[1:]:
+                plans.append(replace(decision, recommendation=Recommendation(
+                    action=action, params={"target": "src", "ttl_minutes": 15},
+                    because="preconfigured report-timeout protective plan")))
+            for plan in plans:
+                verdicts.append(self._executor.handle(
+                    plan, dict(case.ctx, incident_id=iid), "deadline",
+                    case_id="deadline"))
+        executed_count = sum(v == "executed" for v in verdicts)
+        self.auto_actions += executed_count
+        executed = executed_count > 0
+        event = ("critical_deadline_auto_action" if executed
+                 else "critical_deadline_action_withheld")
+        self._audit(iid, event, f"executor verdicts: {verdicts}")
+        log.warning(event, incident_id=iid, verdicts=verdicts)
+        title = ("تصرّف تلقائي بعد انتهاء المهلة" if executed
+                 else "انتهت المهلة دون تنفيذ الإجراء")
         self._notify_text(
-            decision, case, "تصرّف تلقائي بعد انتهاء المهلة",
-            f"لم يستجب أحد خلال المهلة، فنفّذ Sentinel التوصية تلقائيًا. نتيجة التنفيذ: {verdict or 'لا منفّذ'}.")
+            decision, case, title,
+            f"انتهت المهلة. نتيجة محاولة التنفيذ: {', '.join(str(v) for v in verdicts) or 'لا منفّذ'}.")
+        return executed_count
 
     def _audit(self, incident_id: str, name: str, detail: str) -> None:
         self._store.record_action(
@@ -168,10 +187,15 @@ class CriticalWatch:
     def _plan(self, decision, case: _Case) -> str:
         rec = decision.recommendation
         act = rec.action if rec else "لا شيء"
+        if decision.tier == "C":
+            return "فئة الدليل C تحتاج قرارًا بشريًا؛ لن يتصرف النظام تلقائيًا."
         if not self._auto:
             return "لن يتصرف النظام تلقائيًا؛ القرار بيدك."
         if case.acked_by:
             return f"استلمها {case.acked_by}: لن يتصرف النظام تلقائيًا."
+        if decision.outcome.value == "report_wait":
+            act = ", ".join((decision.inputs or {}).get("fallback_actions") or
+                            ["throttle_src"]) + " (15 دقيقة)"
         return (f"إن لم يُتخذ قرار قبل {_fmt_clock(case.deadline)} "
                 f"سينفّذ Sentinel بنفسه: {act} (مؤقتًا ومع إمكانية التراجع).")
 
@@ -180,8 +204,10 @@ class CriticalWatch:
             return
         ctx = case.ctx
         left = max(0, int((case.deadline - self._clock()).total_seconds() // 60))
-        title = ("حالة حرجة تحتاج قرارًا الآن" if first
-                 else f"تذكير: حالة حرجة، باقي {left} دقيقة")
+        critical = decision.outcome.value == "human_approval"
+        title = (("حالة حرجة تحتاج قرارًا الآن" if critical
+                  else "حالة تحتاج قرارًا الآن") if first
+                 else f"تذكير: حالة {'حرجة' if critical else 'معلّقة'}، باقي {left} دقيقة")
         body = (
             f"{ctx.get('src_ip', '?')} ← {ctx.get('dst_ip', '?')} · "
             f"الدرجة {float(decision.score):.0%} · الفئة {decision.tier}\n"
@@ -189,8 +215,9 @@ class CriticalWatch:
             f"الموعد النهائي: {_fmt_clock(case.deadline)} (باقي {left} دقيقة).\n"
             f"{self._plan(decision, case)}\n{decision.would}")
         self._hub.notify_urgent(Notification(
-            title=title, body=body, severity="critical",
-            incident_id=decision.incident_id, outcome="human_approval",
+            title=title, body=body,
+            severity="critical" if decision.outcome.value == "human_approval" else "high",
+            incident_id=decision.incident_id, outcome=decision.outcome.value,
             approval_id=decision.incident_id))
 
     def _notify_text(self, decision, case: _Case, title: str, body: str) -> None:

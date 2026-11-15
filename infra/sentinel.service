@@ -1,0 +1,18 @@
+[Unit]
+Description=Sentinel security observer
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sentinel-app
+EnvironmentFile=-/opt/sentinel-app/.env
+ExecStart=/usr/bin/docker compose up --no-color
+ExecStop=/usr/bin/docker compose stop
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

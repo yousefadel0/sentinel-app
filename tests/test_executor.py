@@ -24,6 +24,7 @@ CTX = {"incident_id": "inc-x", "src_ip": "203.0.113.7", "dst_ip": "10.0.0.99"}
 
 
 class FakeActuator:
+    supports_rollback = True
     def __init__(self, name, ok=True, raises=False):
         self.name, self.ok, self.raises = name, ok, raises
         self.calls, self.rollbacks = [], []
@@ -39,7 +40,7 @@ class FakeActuator:
     def execute_upstream(self, **kw):
         self.calls.append(kw)
         return ActionResult(ok=self.ok, actuator=self.name, detail="sent",
-                            rollback_token=None)
+                            rollback_token=f"tok:{kw['target_ip']}")
 
     def rollback(self, token):
         self.rollbacks.append(token)
@@ -58,10 +59,23 @@ def make(tmp_path, *, level=2, dry_run=False, actuators=None, **kw):
             "webhook_soar": FakeActuator("webhook_soar")}
     acts.update(actuators or {})
     t = [1000.0]
+    kw.setdefault("liveness_check", lambda ctx: "alive")  # explicit test sensor
     ex = Executor(store=store, validator=Validator(config_view()),
                   actuators=acts, autonomy_level=lambda: level,
                   dry_run=dry_run, clock=lambda: t[0], **kw)
     return ex, store, acts, t
+
+
+def test_missing_or_stale_liveness_blocks_execution(tmp_path):
+    _, _, decision = decision_for("volume_spike", 1.0)
+    for name, check in (("missing", None), ("stale", lambda ctx: "stale"),
+                        ("broken", lambda ctx: 1 / 0)):
+        folder = tmp_path / name
+        folder.mkdir()
+        ex, store, acts, _ = make(folder, liveness_check=check)
+        assert ex.handle(decision, CTX, "auto") == "rejected_g6"
+        assert not acts["webhook_soar"].calls
+        store.close()
 
 
 def verdicts(store):
@@ -124,6 +138,19 @@ def test_human_approval_then_block_through_nft_with_ttl_rollback(tmp_path):
     assert store.rows("rollbacks")[0]["ok"] == 1 and not ex.active()
 
 
+def test_engineer_can_modify_pending_plan_with_bounded_ttl(tmp_path):
+    eng, _, d = decision_for("auth_fail_burst", 0.93)
+    with pytest.raises(ValueError):
+        eng.resolve(d.incident_id, True, action_override="arbitrary_shell")
+    assert d.incident_id in eng.pending_approvals()
+    modified = eng.resolve(d.incident_id, True, actor="engineer-1",
+                           action_override="throttle_src", ttl_minutes=10)
+    assert modified.recommendation.action == "throttle_src"
+    assert modified.recommendation.params["ttl_minutes"] == 10
+    assert modified.inputs["approved_by"] == "engineer-1"
+    assert "engineer-1" in modified.audit_events[-1].detail
+
+
 def test_denied_or_non_actionable_decisions_do_nothing(tmp_path):
     eng, _, d = decision_for("auth_fail_burst", 0.93)
     denied = eng.resolve(d.incident_id, False)
@@ -143,6 +170,18 @@ def test_g6_rejects_critical_asset_target_even_if_engine_allowed(tmp_path):
     ctx = {"incident_id": "i", "src_ip": "198.51.100.7", "dst_ip": "10.0.0.99"}
     assert ex.handle(resolved, ctx, "approved") == "rejected_g6"
     assert not acts["nftables_local"].calls
+
+
+def test_protected_admin_source_cannot_be_blocked_after_approval(tmp_path):
+    eng, _, d = decision_for("auth_fail_burst", 0.93)
+    resolved = eng.resolve(d.incident_id, True)
+    ex, store, acts, _ = make(tmp_path, level=1)
+    ex._validator = Validator(config_view(protected_ips=frozenset({"198.51.100.7"})))
+    assert ex.handle(resolved, {"incident_id": d.incident_id,
+                                "src_ip": "198.51.100.7",
+                                "dst_ip": "10.0.0.99"}, "approved") == "rejected_g6"
+    assert not acts["nftables_local"].calls
+    assert store.rows("actions")[-1]["executed"] == 0
 
 
 def test_missing_failing_and_crashing_actuators_are_honest(tmp_path):
@@ -211,7 +250,8 @@ def _flood_daemon(tmp_path, monkeypatch, *, level, dry_run, port):
     cp = tmp_path / "c.yaml"
     cp.write_text(yaml.safe_dump(cfg))
     store = Store(tmp_path / "a.sqlite")
-    d = build_daemon(load_config(cp), tmp_path, store, dry_run=dry_run)
+    d = build_daemon(load_config(cp), tmp_path, store, dry_run=dry_run,
+                     liveness_check=lambda ctx: "alive")  # test sensor
     base = datetime.now(timezone.utc) - timedelta(seconds=40)
     hdr = ("#fields\tts\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\n"
            "#types\ttime\taddr\tport\taddr\tport\tstring\n")
@@ -231,7 +271,7 @@ def soar():
     srv.shutdown()
 
 
-def test_critical_asset_ddos_needs_approval_then_reaches_the_soar(tmp_path, monkeypatch, soar):
+def test_critical_asset_ddos_approval_stays_local_without_rollback_contract(tmp_path, monkeypatch, soar):
     monkeypatch.setenv("SENTINEL_SOAR_TOKEN", "tok123")
     d, store = _flood_daemon(tmp_path, monkeypatch, level=1, dry_run=False, port=soar)
     d.run_once()
@@ -242,15 +282,35 @@ def test_critical_asset_ddos_needs_approval_then_reaches_the_soar(tmp_path, monk
     assert list(pending) == [dec["incident_id"]]
     d._resolutions.put((dec["incident_id"], True))       # the Telegram path
     d.run_once()
-    payload, auth = _Soar.received[0]
-    assert payload["action"] == "recommend_upstream_mitigation"
-    assert payload["target_ip"] == "10.0.0.4" and payload["ttl_minutes"] == 30
-    assert auth == "Bearer tok123"
-    act = store.rows("actions")[0]
-    assert (act["verdict"], act["executed"]) == ("executed", 1)
+    assert _Soar.received == []
+    act = next(r for r in store.rows("actions") if r["action_type"] == "recommend_upstream_mitigation")
+    assert (act["verdict"], act["executed"]) == ("rejected_g6", 0)
+    assert "rollback contract" in act["detail"]
     assert act["case_id"] == "telegram" and act["detail"].startswith("approved:")
     assert store.verify_chain()["ok"]
     store.close()
+
+
+def test_pending_approval_and_deadline_survive_daemon_restart(tmp_path, monkeypatch, soar):
+    from sentinel.config.loader import load_config
+    from sentinel.daemon import build_daemon
+
+    daemon, store = _flood_daemon(tmp_path, monkeypatch, level=2,
+                                  dry_run=True, port=soar)
+    daemon.run_once()
+    pending = daemon._engine.pending_approvals()
+    assert len(pending) == 1
+    original = next(iter(pending.values()))
+    store.close()
+
+    reopened = Store(tmp_path / "a.sqlite")
+    restored = build_daemon(load_config(tmp_path / "c.yaml"), tmp_path,
+                            reopened, dry_run=True)
+    pending_after = restored._engine.pending_approvals()
+    assert pending_after[original.incident_id].approval_deadline == original.approval_deadline
+    assert restored._watch.status(original.incident_id) is not None
+    assert reopened.verify_chain()["ok"]
+    reopened.close()
 
 
 def test_default_dry_run_never_reaches_the_soar(tmp_path, monkeypatch, soar):
@@ -259,7 +319,8 @@ def test_default_dry_run_never_reaches_the_soar(tmp_path, monkeypatch, soar):
     d._resolutions.put((store.rows("decisions")[0]["incident_id"], True))
     d.run_once()
     assert _Soar.received == []
-    assert [r["verdict"] for r in store.rows("actions")] == ["dry_run"]
+    assert [r["verdict"] for r in store.rows("actions")
+            if r["action_type"] == "recommend_upstream_mitigation"] == ["dry_run"]
     store.close()
 
 
@@ -269,7 +330,8 @@ def test_level_zero_blocks_even_live_mode(tmp_path, monkeypatch, soar):
     d._resolutions.put((store.rows("decisions")[0]["incident_id"], True))
     d.run_once()
     assert _Soar.received == []
-    assert [r["verdict"] for r in store.rows("actions")] == ["withheld_autonomy"]
+    assert [r["verdict"] for r in store.rows("actions")
+            if r["action_type"] == "recommend_upstream_mitigation"] == ["withheld_autonomy"]
     store.close()
 
 
@@ -299,6 +361,17 @@ def test_cli_refuses_live_mode_at_autonomy_zero(tmp_path, capsys):
     assert main(["--no-dry-run", "--config", str(cp), "run",
                  "--capture-dir", str(tmp_path)]) == 1
     assert "autonomy_level is 0" in capsys.readouterr().err
+
+
+def test_cli_refuses_live_mode_without_explicit_protected_ips(tmp_path, capsys):
+    cfg = yaml.safe_load(CFG.read_text())
+    cfg["autonomy_level"] = 2
+    cfg["audit_store"] = {"path": str(tmp_path / "a.sqlite")}
+    cp = tmp_path / "c.yaml"
+    cp.write_text(yaml.safe_dump(cfg))
+    assert main(["--no-dry-run", "--config", str(cp), "run",
+                 "--capture-dir", str(tmp_path)]) == 1
+    assert "site.protected_ips is empty" in capsys.readouterr().err
 
 
 def test_ctl_rollback_all_is_honest_without_nft(monkeypatch, capsys):

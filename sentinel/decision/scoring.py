@@ -25,6 +25,7 @@ SEVERITY_DEFAULTS: dict[str, int] = {
     "ddos_volumetric": 5,
     "c2_beacon": 4,
     "dns_tunneling": 3,
+    "baseline_anomaly": 5,
 }
 
 # §3.1 additive penalties (verbatim magnitudes).

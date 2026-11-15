@@ -19,6 +19,7 @@ class Outcome(str, enum.Enum):
     AUTO_ACT = "auto_act"
     AUTO_THROTTLE = "auto_throttle"
     HUMAN_APPROVAL = "human_approval"
+    REPORT_WAIT = "report_wait"
     ESCALATE_HUMAN = "escalate_human"
     NOTIFY_ONLY = "notify_only"
     LOG_ONLY = "log_only"
@@ -32,6 +33,7 @@ class AttackType(str, enum.Enum):
     DDOS_VOLUMETRIC = "ddos_volumetric"
     C2_BEACON = "c2_beacon"
     DNS_TUNNELING = "dns_tunneling"
+    BASELINE_ANOMALY = "baseline_anomaly"
 
 
 # Signal families (M1 vocabulary) -> attack type. Priority order matters:
@@ -43,6 +45,7 @@ SIGNAL_TO_ATTACK: tuple[tuple[str, AttackType], ...] = (
     ("volume_spike", AttackType.DDOS_VOLUMETRIC),
     ("ddos_volumetric", AttackType.DDOS_VOLUMETRIC),
     ("scan", AttackType.SCAN),
+    ("baseline_anomaly", AttackType.BASELINE_ANOMALY),
 )
 
 

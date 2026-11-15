@@ -23,13 +23,15 @@ with the same record_decision call shape. No other write exists.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from sentinel.auditstore.store import Store
@@ -82,7 +84,8 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                capture_dir: Path | None = None,
                report_dir: Path | None = None,
                on_resolved=None, on_ack=None,
-               critical_status=None) -> FastAPI:
+               critical_status=None, executor=None,
+               config_path: Path | None = None) -> FastAPI:
     """Build the ops UI app from a VALIDATED config.
 
     Fail-closed rules enforced here at construction time:
@@ -110,6 +113,8 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     app.state.on_resolved = on_resolved
     app.state.on_ack = on_ack
     app.state.critical_status = critical_status
+    app.state.executor = executor
+    app.state.config_path = Path(config_path) if config_path else None
 
     static_dir = Path(__file__).parent / "static"
     # DP2: mount ONLY the vendored file directory; every file in it must
@@ -119,7 +124,18 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     def _guard(request: Request) -> None:
         auth.check(request)
 
+    def _record_ui_change(action: str, detail: str) -> None:
+        if app.state.store is not None:
+            app.state.store.record_action(case_id="ops_ui", action_type=action,
+                                          target_ip=None, ttl_minutes=None,
+                                          verdict="saved", executed=False,
+                                          detail=detail)
+
     # -- dashboard shell ------------------------------------------------ #
+    @app.get("/login", response_class=HTMLResponse)
+    def login() -> HTMLResponse:
+        return HTMLResponse(pages.login(), headers={"Cache-Control": "no-store"})
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         _guard(request)
@@ -179,7 +195,8 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             media_type="application/json")
 
     def _resolve_and_record(approval_id: str, approved: bool,
-                            request: Request) -> Response:
+                            request: Request, *, action_override: str | None = None,
+                            ttl_minutes: int | None = None) -> Response:
         """THE approval write path — same seam as CLI (Engine.resolve)."""
         _guard(request)
         if app.state.engine is None or app.state.store is None:
@@ -187,9 +204,14 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                 "no engine/store attached; approvals unavailable in "
                 "standalone observer mode"))
         try:
-            decision = app.state.engine.resolve(approval_id, approved)
+            decision = app.state.engine.resolve(approval_id, approved,
+                                                actor="ops_ui_authenticated",
+                                                action_override=action_override,
+                                                ttl_minutes=ttl_minutes)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
         rec = decision.recommendation
         app.state.store.record_decision(
             case_id="ops_ui",
@@ -227,6 +249,20 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     @app.post("/approvals/{approval_id}/deny")
     def deny(approval_id: str, request: Request) -> Response:
         return _resolve_and_record(approval_id, False, request)
+
+    @app.post("/approvals/{approval_id}/modify")
+    async def modify(approval_id: str, request: Request) -> Response:
+        raw = (await request.body())[:8192].decode("utf-8", "replace")
+        form = {k: v[0] for k, v in parse_qs(raw).items()}
+        action = request.query_params.get("action") or form.get("action", "")
+        try:
+            ttl_minutes = int(request.query_params.get("ttl_minutes") or
+                              form.get("ttl_minutes", "15"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid ttl_minutes") from None
+        return _resolve_and_record(approval_id, True, request,
+                                   action_override=action,
+                                   ttl_minutes=ttl_minutes)
 
     # -- incidents viewer (read-only) ----------------------------------- #
     @app.get("/incidents/recent")
@@ -283,6 +319,36 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                         headers={"Content-Disposition":
                                  "attachment; filename=sentinel-audit.csv"})
 
+    @app.get("/audit/export.json")
+    def audit_export_json(request: Request, outcome: Optional[str] = None,
+                          case_id: Optional[str] = None, q: Optional[str] = None) -> Response:
+        _guard(request)
+        rows = views.audit_search(_need_store(), outcome=outcome,
+                                  case_id=case_id, q=q, limit=1000)
+        return Response(views.serialize(rows), media_type="application/json",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=sentinel-audit.json"})
+
+    @app.get("/ui/events")
+    async def ui_events(request: Request) -> StreamingResponse:
+        _guard(request)
+        async def stream():
+            previous = None
+            while not await request.is_disconnected():
+                store = app.state.store
+                head = store.chain_head().get("seq") if store else 0
+                health = views.runtime_status(app.state.capture_dir)
+                learning = health.get("learning") or {}
+                current = (head, health.get("mode"), learning.get("observed_days"),
+                           learning.get("extend_days"))
+                if previous != current:
+                    yield "data: %s\n\n" % json.dumps({"audit_seq": head, "mode": health.get("mode")})
+                    previous = current
+                await asyncio.sleep(2)
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
     # -- Ops UI v2 pages (fragments; all token-guarded, read-only) --------- #
     def _page(html: str) -> HTMLResponse:
         return HTMLResponse(html)
@@ -293,10 +359,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     @app.get("/ui/mode", response_class=HTMLResponse)
     def ui_mode(request: Request) -> HTMLResponse:
         _guard(request)
-        live = views._live_health(app.state.capture_dir)
-        fresh = bool(live) and not any(s.get("daemon_stale") for s in live)
-        return _page(pages.mode_badge({"live": live is not None,
-                                       "daemon_fresh": fresh}))
+        return _page(pages.mode_badge(views.runtime_status(app.state.capture_dir)))
 
     @app.get("/ui/overview", response_class=HTMLResponse)
     def ui_overview(request: Request, origin: str = "") -> HTMLResponse:
@@ -306,9 +369,12 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
         ov = analytics.overview(store, origin=origin)
         level = int((cfg.get("autonomy_level", 0)) or 0)
+        learning = views.runtime_status(app.state.capture_dir).get("learning") or {}
         return _page(pages.overview(
-            ov, analytics.autonomy_readiness(ov, level), views.kpis(store),
-            len(views.pending_queue(app.state.engine))))
+            ov, analytics.autonomy_readiness(ov, level,
+                                             learning.get("observed_days")),
+            views.kpis(store), len(views.pending_queue(app.state.engine)),
+            analytics.incident_list(store, origin=origin)["rows"][:10], learning))
 
     @app.get("/ui/incidents", response_class=HTMLResponse)
     def ui_incidents(request: Request, outcome: str = "", tier: str = "",
@@ -390,11 +456,12 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         if store is not None:
             for p in pending:
                 row = store.query(
-                    "SELECT src_ip, dst_ip, attack_type FROM incident_context"
+                    "SELECT src_ip, dst_ip, attack_type, mitre FROM incident_context"
                     " WHERE incident_id = ? ORDER BY id DESC LIMIT 1",
                     (p["approval_id"],))
                 if row:
-                    p["src_ip"], p["dst_ip"], p["attack_type"] = row[0]
+                    p["src_ip"], p["dst_ip"], p["attack_type"], raw_mitre = row[0]
+                    p["mitre"] = json.loads(raw_mitre)
             history = [dict(zip(("ts", "incident_id", "outcome", "case_id"), r))
                        for r in store.query(
                            "SELECT ts, incident_id, outcome, case_id FROM decisions"
@@ -402,7 +469,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                            " ORDER BY id DESC LIMIT 25")]
         cs = app.state.critical_status
         for p in pending:
-            p["watch"] = cs(p["approval_id"]) if (cs and p.get("critical")) else None
+            p["watch"] = cs(p["approval_id"]) if cs else None
         return _page(pages.approvals(pending, history,
                                      app.state.engine is not None,
                                      can_ack=app.state.on_ack is not None))
@@ -436,7 +503,240 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     @app.get("/ui/settings", response_class=HTMLResponse)
     def ui_settings(request: Request) -> HTMLResponse:
         _guard(request)
-        return _page(pages.settings(views.settings_view(cfg)))
+        from sentinel.config.loader import load_config
+        current = load_config(app.state.config_path) if app.state.config_path else cfg
+        return _page(pages.settings(views.settings_view(
+            current, app.state.capture_dir), editable=app.state.config_path is not None))
+
+    def _write_ui_settings(updated: dict) -> None:
+        import yaml
+        from sentinel.config.loader import ui_override_path
+        path = ui_override_path(updated)
+        if path is None:
+            raise HTTPException(status_code=409, detail="audit store path unavailable")
+        changes = {"site": {"protected_ips": updated["site"].get("protected_ips", [])},
+                   "policy": updated.get("policy") or {},
+                   "limits": updated.get("limits") or {},
+                   "notifiers": updated.get("notifiers") or [],
+                   "enforcement_dry_run": updated.get("enforcement_dry_run", True)}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".tmp")
+        temp.write_text(yaml.safe_dump(changes, allow_unicode=True, sort_keys=False),
+                        encoding="utf-8")
+        temp.replace(path)
+
+    @app.post("/settings/save", response_class=HTMLResponse)
+    async def save_settings(request: Request) -> HTMLResponse:
+        _guard(request)
+        path = app.state.config_path
+        if path is None:
+            raise HTTPException(status_code=409, detail="configuration file not attached")
+        import ipaddress
+        from sentinel.config.loader import ConfigError, load_config, validate_config
+        form = {k: v[0] for k, v in parse_qs(
+            (await request.body())[:8192].decode("utf-8", "replace")).items()}
+        try:
+            updated = load_config(path)
+            allowed = ("auto_act_threshold", "human_approval_threshold", "report_threshold")
+            for name in allowed:
+                updated.setdefault("policy", {})[name] = float(form[name])
+            for name in ("approval_timeout_minutes", "report_timeout_minutes"):
+                updated["policy"][name] = int(form[name])
+            for name in ("max_blocks_per_min", "max_blocks_per_hour", "default_ttl_min"):
+                updated.setdefault("limits", {})[name] = int(form[name])
+            ips = [part.strip() for part in form["protected_ips"].split(",") if part.strip()]
+            for address in ips:
+                ipaddress.IPv4Address(address)
+            updated["site"]["protected_ips"] = list(dict.fromkeys(ips))
+            channels = json.loads(form["notifiers"])
+            if not isinstance(channels, list):
+                raise ValueError("notification channels must be a JSON list")
+            updated["notifiers"] = channels
+            validate_config(updated)
+        except (KeyError, ValueError, ConfigError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail=f"invalid settings: {exc}") from None
+        _write_ui_settings(updated)
+        _record_ui_change("settings_saved", "restart_required")
+        return _page(pages.settings(views.settings_view(updated, app.state.capture_dir),
+                                    editable=True, saved=True))
+
+    @app.post("/settings/dry-run", response_class=HTMLResponse)
+    async def save_dry_run(request: Request) -> HTMLResponse:
+        _guard(request)
+        path = app.state.config_path
+        if path is None:
+            raise HTTPException(status_code=409, detail="configuration file not attached")
+        from sentinel.config.loader import load_config, validate_config
+        form = parse_qs((await request.body())[:1024].decode("utf-8", "replace"))
+        value = (form.get("dry_run") or [""])[0]
+        if value not in ("on", "off"):
+            raise HTTPException(status_code=422, detail="invalid dry-run value")
+        updated = load_config(path)
+        if value == "off":
+            runtime = views.runtime_status(app.state.capture_dir)
+            if (updated.get("autonomy_level", 0) < 1 or
+                    not updated["site"].get("protected_ips") or
+                    runtime.get("mode") != "active" or
+                    not runtime.get("fresh") or
+                    any(s.get("status") != "healthy" for s in runtime.get("sources") or [])):
+                raise HTTPException(status_code=409, detail="live enforcement safety gate not ready")
+        updated["enforcement_dry_run"] = value == "on"
+        validate_config(updated)
+        _write_ui_settings(updated)
+        _record_ui_change("dry_run_config_saved", value)
+        return _page(pages.settings(views.settings_view(updated, app.state.capture_dir),
+                                    editable=True, saved=True))
+
+    def _learning():
+        if app.state.store is None:
+            raise HTTPException(status_code=409, detail="no learning profile attached")
+        from sentinel.learning import LearningProfile
+        path = app.state.store._path.with_name("learning.json")
+        if not path.is_file():
+            raise HTTPException(status_code=409, detail="learning profile unavailable")
+        return LearningProfile(path)
+
+    @app.get("/ui/learning", response_class=HTMLResponse)
+    def ui_learning(request: Request) -> HTMLResponse:
+        _guard(request)
+        try:
+            return _page(pages.learning(_learning().export()))
+        except (ValueError, OSError) as exc:
+            return _page(pages.empty(f"تعذر قراءة ملف التعلّم: {exc}"))
+
+    @app.get("/learning/export.json")
+    def learning_export(request: Request) -> Response:
+        _guard(request)
+        return Response(views.serialize(_learning().export()),
+                        media_type="application/json",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=sentinel-learning.json"})
+
+    @app.post("/learning/mode", response_class=HTMLResponse)
+    async def learning_mode(request: Request) -> HTMLResponse:
+        _guard(request)
+        form = parse_qs((await request.body())[:1024].decode("utf-8", "replace"))
+        value = (form.get("mode") or [""])[0]
+        if value not in ("auto", "learning", "active"):
+            raise HTTPException(status_code=422, detail="invalid learning mode")
+        profile = _learning()
+        profile.set_override(value)
+        _record_ui_change("learning_mode_override", value)
+        return _page(pages.learning(profile.export()))
+
+    @app.post("/learning/extend", response_class=HTMLResponse)
+    async def learning_extend(request: Request) -> HTMLResponse:
+        _guard(request)
+        form = parse_qs((await request.body())[:1024].decode("utf-8", "replace"))
+        try:
+            days = int((form.get("days") or [""])[0])
+            profile = _learning()
+            profile.extend(days)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        _record_ui_change("learning_extend_days", str(days))
+        return _page(pages.learning(profile.export()))
+
+    def _intel_data(q: str = "") -> dict:
+        from sentinel.threatintel.attack import load_attack_catalog
+        store = app.state.store
+        base = store._path.parent if store else Path("data")
+        path = base / "attack-catalog.json"
+        catalog = load_attack_catalog(path)
+        terms = q.strip().lower()[:80]
+        techniques = [v for k, v in catalog.get("techniques", {}).items()
+                      if not terms or terms in k.lower() or
+                      terms in str(v.get("name", "")).lower()][:100]
+        cve_path = base / "cve-cache.json"
+        try:
+            cve = json.loads(cve_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cve = {}
+        return {"q": q, "source": catalog.get("source"),
+                "techniques": techniques,
+                "technique_count": len(catalog.get("techniques", {})),
+                "refreshed_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+                if path.is_file() else None,
+                "cve_count": len(cve.get("entries", cve)) if isinstance(cve, dict) else 0,
+                "cves": [k for k in cve if terms in k.lower()][:100] if isinstance(cve, dict) else []}
+
+    @app.get("/ui/intel", response_class=HTMLResponse)
+    def ui_intel(request: Request, q: str = "") -> HTMLResponse:
+        _guard(request)
+        return _page(pages.intel(_intel_data(q)))
+
+    @app.get("/ui/actions", response_class=HTMLResponse)
+    def ui_actions(request: Request) -> HTMLResponse:
+        _guard(request)
+        store = _need_store()
+        actions = store.query("SELECT id, ts, case_id, action_type, target_ip, ttl_minutes,"
+                              " verdict, executed, detail FROM actions ORDER BY id DESC LIMIT 100")
+        rollbacks = store.query("SELECT ts, case_id, ok, detail FROM rollbacks"
+                                " ORDER BY id DESC LIMIT 30")
+        active = app.state.executor.active() if app.state.executor else []
+        return _page(pages.actions(actions, rollbacks, active,
+                                   app.state.executor is not None))
+
+    @app.post("/actions/rollback", response_class=HTMLResponse)
+    async def ui_rollback(request: Request) -> HTMLResponse:
+        _guard(request)
+        if app.state.executor is None:
+            raise HTTPException(status_code=409, detail="no executor attached")
+        form = parse_qs((await request.body())[:2048].decode("utf-8", "replace"))
+        action = (form.get("action") or [""])[0]
+        target = (form.get("target") or [""])[0]
+        if not app.state.executor.rollback_one(action, target):
+            raise HTTPException(status_code=404, detail="active action not found or rollback failed")
+        return ui_actions(request)
+
+    def _report() -> dict:
+        store = _need_store()
+        first = analytics.incident_list(store, page=1)
+        items = list(first["rows"])
+        for page in range(2, first["pages"] + 1):
+            items.extend(analytics.incident_list(store, page=page)["rows"])
+        return {"generated_at": datetime.now(timezone.utc).isoformat(),
+                "runtime": views.runtime_status(app.state.capture_dir),
+                "kpis": views.kpis(store), "audit_chain": store.verify_chain(),
+                "incidents": items,
+                "actions": [dict(zip(("ts", "action", "target", "verdict", "executed"), r))
+                            for r in store.query("SELECT ts, action_type, target_ip, verdict, executed"
+                                                 " FROM actions ORDER BY id DESC")]}
+
+    @app.get("/ui/reports", response_class=HTMLResponse)
+    def ui_reports(request: Request) -> HTMLResponse:
+        _guard(request)
+        path = app.state.report_dir / "latest.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        return _page(pages.reports(data))
+
+    @app.post("/reports/generate", response_class=HTMLResponse)
+    def generate_report(request: Request) -> HTMLResponse:
+        _guard(request)
+        report = _report()
+        path = app.state.report_dir / "latest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(path)
+        return _page(pages.reports(report))
+
+    @app.get("/reports/latest.json")
+    def latest_json(request: Request) -> Response:
+        _guard(request)
+        path = app.state.report_dir / "latest.json"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="no report generated")
+        return FileResponse(path, media_type="application/json",
+                            filename="sentinel-report.json")
+
+    @app.get("/ui/guide", response_class=HTMLResponse)
+    def ui_guide(request: Request) -> HTMLResponse:
+        _guard(request)
+        return _page(pages.guide())
 
     # -- KPI counters (read-only; exact names per P5) -------------------- #
     @app.get("/kpis")
@@ -455,12 +755,14 @@ def serve(cfg: dict, engine=None, store: Store | None = None,
           capture_dir: Path | None = None,
           report_dir: Path | None = None,
           on_resolved=None, on_ack=None,
-          critical_status=None) -> None:
+          critical_status=None, executor=None,
+          config_path: Path | None = None) -> None:
     """Blocking uvicorn run bound to the validated loopback host:port."""
     import uvicorn
     ui_cfg = cfg["ops_ui"]
     host = ui_cfg["bind"].rsplit(":", 1)[0].strip("[]")
     app = create_app(cfg, engine=engine, store=store, capture_dir=capture_dir,
                      report_dir=report_dir, on_resolved=on_resolved,
-                     on_ack=on_ack, critical_status=critical_status)
+                     on_ack=on_ack, critical_status=critical_status,
+                     executor=executor, config_path=config_path)
     uvicorn.run(app, host=host, port=app.state.port, log_level="warning")

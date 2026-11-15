@@ -1,0 +1,32 @@
+site:
+  name: sentinel-pilot
+  critical_assets: []
+  protected_ips: []
+capture_interfaces:
+  - {name: span, type: af_packet, iface: eth1}
+placement:
+  primary_tap: span
+  secondary_tap: span
+  asymmetric_risk: medium
+monitored_vlans: [unconfigured]
+unmapped_vlans: []
+has_nat: false
+brain: {llm_endpoint_env: SENTINEL_LLM_API, timeout_s: 8, hard_cutoff_s: 5}
+actuators:
+  - {type: nftables_local}
+autonomy_level: 0
+enforcement_dry_run: true
+limits: {max_blocks_per_min: 5, max_blocks_per_hour: 20, default_ttl_min: 30}
+policy:
+  auto_act_threshold: 0.95
+  human_approval_threshold: 0.80
+  report_threshold: 0.50
+  approval_timeout_minutes: 15
+  report_timeout_minutes: 30
+  report_fallback_actions: [throttle_src, block_ip_temp]
+audit_store: {path: /var/lib/sentinel/audit.sqlite}
+ops_ui:
+  enabled: true
+  bind: "127.0.0.1:8080"
+  auth_token_env: SENTINEL_OPS_UI_TOKEN
+  allowed_ports: [8080]

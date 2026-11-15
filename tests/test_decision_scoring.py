@@ -31,6 +31,7 @@ def test_severity_defaults_table_exact():
     assert SEVERITY_DEFAULTS == {
         "scan": 2, "brute_force": 4, "ddos_volumetric": 5,
         "c2_beacon": 4, "dns_tunneling": 3,
+        "baseline_anomaly": 5,
     }
 
 

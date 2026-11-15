@@ -53,6 +53,7 @@ class WebhookSoarActuator:
     """POST verdict/action payloads to the operator's SOAR endpoint."""
 
     name = "webhook_soar"
+    supports_rollback = False
 
     def __init__(
         self,

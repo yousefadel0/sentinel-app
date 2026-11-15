@@ -10,6 +10,8 @@ No future subcommands are stubbed here — later milestones add their own.
 from __future__ import annotations
 
 import argparse
+import os
+import secrets
 import sys
 
 import sentinel
@@ -50,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_sub = cfg.add_subparsers(dest="config_command", required=True)
     val = cfg_sub.add_parser("validate", help="strictly validate a config file")
     val.add_argument("path", metavar="PATH", help="path to config.yaml")
+
+    learn = ctl_sub.add_parser("learning", help="inspect or control the learning period")
+    learn.add_argument("path", metavar="PROFILE", help="path to learning.json")
+    learn_sub = learn.add_subparsers(dest="learning_command", required=True)
+    learn_sub.add_parser("status", help="print the versioned learning profile")
+    mode = learn_sub.add_parser("mode", help="set auto, learning or active override")
+    mode.add_argument("value", choices=("auto", "learning", "active"))
+    extend = learn_sub.add_parser("extend", help="add days to the learning period")
+    extend.add_argument("days", type=int)
 
     sub.add_parser("selftest", help="prove the pipeline works on this machine "
                    "(temporary folder, touches nothing)")
@@ -213,6 +224,8 @@ def _run_daemon(args) -> int:
               file=sys.stderr)
         return EXIT_FAIL
     store_cfg = cfg.get("audit_store") or {}
+    if not getattr(args, "dry_run_explicit", False):
+        args.dry_run = cfg.get("enforcement_dry_run", True)
     if not store_cfg.get("path"):
         print("sentinel run requires `audit_store.path` in the config (ref §8/D5)",
               file=sys.stderr)
@@ -223,10 +236,25 @@ def _run_daemon(args) -> int:
               "(Project.md §6); nothing would be executed at L0 anyway.",
               file=sys.stderr)
         return EXIT_FAIL
+    if not args.dry_run and not cfg["site"].get("protected_ips"):
+        print("REFUSING --no-dry-run: site.protected_ips is empty. Configure "
+              "admin, gateway, DNS and critical-server addresses first.",
+              file=sys.stderr)
+        return EXIT_FAIL
+    if args.ui:
+        ui_cfg = cfg.get("ops_ui") or {}
+        token_env = ui_cfg.get("auth_token_env", "SENTINEL_OPS_UI_TOKEN")
+        if not os.environ.get(token_env):
+            os.environ[token_env] = secrets.token_urlsafe(24)
+            print(f"{token_env} for this run: {os.environ[token_env]}",
+                  file=sys.stderr)
     store = Store(store_cfg["path"], check_same_thread=not args.ui)
     daemon = build_daemon(cfg, Path(args.capture_dir), store,
                           start_at_end=args.skip_history,
-                          dry_run=args.dry_run)
+                          dry_run=args.dry_run,
+                          learning_path=Path(store_cfg["path"]).with_name("learning.json"),
+                          intel_path=Path(store_cfg["path"]).with_name("attack-catalog.json"),
+                          cve_path=Path(store_cfg["path"]).with_name("cve-cache.json"))
     if not args.dry_run:
         log.warning("ENFORCEMENT_ENABLED", autonomy_level=cfg["autonomy_level"],
                     note="actions will be executed through configured actuators")
@@ -244,7 +272,9 @@ def _run_daemon(args) -> int:
                         capture_dir=Path(args.capture_dir),
                         on_resolved=daemon.execute_approved,
                         on_ack=daemon.acknowledge,
-                        critical_status=daemon.critical_status)).start()
+                        critical_status=daemon.critical_status,
+                        executor=daemon._executor,
+                        config_path=Path(args.config))).start()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
@@ -258,6 +288,8 @@ def _run_daemon(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns process exit code (0 ok / 1 fail)."""
     args = build_parser().parse_args(argv)
+    args.dry_run_explicit = any(flag in (argv if argv is not None else sys.argv[1:])
+                                for flag in ("--dry-run", "--no-dry-run"))
     setup_logging(args.log_level)
 
     if args.command == "ctl" and args.ctl_command == "config":
@@ -288,6 +320,25 @@ def main(argv: list[str] | None = None) -> int:
             store.close()
         print(_json.dumps(report, indent=2, sort_keys=True))
         return EXIT_OK if report["ok"] else EXIT_FAIL
+
+    if args.command == "ctl" and args.ctl_command == "learning":
+        import json as _json
+        from pathlib import Path as _Path
+        from sentinel.learning import LearningProfile
+        if not _Path(args.path).is_file():
+            print(f"no such learning profile: {args.path}", file=sys.stderr)
+            return EXIT_FAIL
+        try:
+            profile = LearningProfile(args.path)
+            if args.learning_command == "mode":
+                profile.set_override(args.value)
+            elif args.learning_command == "extend":
+                profile.extend(args.days)
+            print(_json.dumps(profile.export(), indent=2, sort_keys=True))
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"learning profile error: {exc}", file=sys.stderr)
+            return EXIT_FAIL
+        return EXIT_OK
 
     if args.command == "ctl" and args.ctl_command == "rollback":
         from sentinel.actuators import NftablesLocalActuator

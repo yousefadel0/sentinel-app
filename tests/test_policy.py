@@ -43,13 +43,13 @@ def test_threshold_decides_auto_vs_human():
     d95 = run(eng(auto_threshold=0.95), "volume_spike", 0.92, "critical")
     assert d90.outcome.value == "auto_act" and d95.outcome.value == "human_approval"
     low = run(eng(human_threshold=0.80), "auth_fail_burst", 0.93, "critical")
-    assert low.outcome.value == "log_only" and "0.80" in low.would
+    assert low.outcome.value == "human_approval"
 
 
-def test_config_defaults_are_95_and_70(tmp_path):
+def test_config_defaults_are_95_80_and_50(tmp_path):
     cfg = yaml.safe_load(CFG.read_text())
     view = _config_view(cfg)
-    assert (view.auto_threshold, view.human_threshold) == (0.95, 0.70)
+    assert (view.auto_threshold, view.human_threshold, view.report_threshold) == (0.95, 0.80, 0.50)
     cfg["policy"] = {"auto_act_threshold": 0.97, "human_approval_threshold": 0.6}
     view = _config_view(load_config(_write(tmp_path, cfg)))
     assert (view.auto_threshold, view.human_threshold) == (0.97, 0.6)
@@ -76,7 +76,7 @@ def test_invalid_policy_is_refused(tmp_path):
 def test_blocking_an_outside_attacker_of_a_critical_server_reaches_a_human():
     e = eng(critical_assets=frozenset({"10.0.0.4"}))
     d = run(e, "auth_fail_burst", 0.97, "critical", src="198.51.100.7", dst="10.0.0.4")
-    assert d.outcome.value == "human_approval"            # was escalate_human
+    assert d.outcome.value == "auto_act"
     assert d.recommendation.action == "block_ip_temp"
     assert not any(ev.name == "critical_asset_allowlist_hit" for ev in d.audit_events)
 
@@ -84,6 +84,13 @@ def test_blocking_an_outside_attacker_of_a_critical_server_reaches_a_human():
 def test_g1_still_blocks_when_the_target_itself_is_critical():
     e = eng(critical_assets=frozenset({"10.0.0.4", "198.51.100.7"}))
     d = run(e, "auth_fail_burst", 0.97, "critical", src="198.51.100.7", dst="10.0.0.99")
+    assert d.outcome.value == "escalate_human"
+    assert any(ev.name == "critical_asset_allowlist_hit" for ev in d.audit_events)
+
+
+def test_protected_admin_ip_caps_the_decision_before_execution():
+    e = eng(protected_ips=frozenset({"198.51.100.7"}))
+    d = run(e, "auth_fail_burst", 0.98, "critical", src="198.51.100.7")
     assert d.outcome.value == "escalate_human"
     assert any(ev.name == "critical_asset_allowlist_hit" for ev in d.audit_events)
 
@@ -124,14 +131,15 @@ def test_invalid_asset_criticality_is_refused(tmp_path):
 
 # -- end to end through the daemon ----------------------------------------------------
 
-def test_brute_force_on_critical_server_now_asks_a_human(tmp_path):
+def test_brute_force_confidence_drives_band_before_asset_score(tmp_path):
     from sentinel.auditstore.store import Store
     from sentinel.daemon import build_daemon
     cfg = yaml.safe_load(CFG.read_text())
     cfg["audit_store"] = {"path": str(tmp_path / "a.sqlite")}
     cp = _write(tmp_path, cfg)
     store = Store(tmp_path / "a.sqlite")
-    d = build_daemon(load_config(cp), tmp_path, store)
+    d = build_daemon(load_config(cp), tmp_path, store,
+                     liveness_check=lambda ctx: "alive")  # synthetic proof
     base = datetime.now(timezone.utc) - timedelta(seconds=60)
     hdr = ("#fields\tts\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\n"
            "#types\ttime\taddr\tport\taddr\tport\tstring\n")
@@ -141,6 +149,6 @@ def test_brute_force_on_critical_server_now_asks_a_human(tmp_path):
     (tmp_path / "conn.log").write_text(hdr + rows)
     d.run_once()
     dec = store.rows("decisions")[0]
-    assert dec["outcome"] == "human_approval" and dec["score"] >= 0.70
-    assert d._engine.pending_approvals()
+    assert dec["outcome"] == "auto_throttle" and 0.50 <= dec["score"] < 0.80
+    assert not d._engine.pending_approvals()
     store.close()

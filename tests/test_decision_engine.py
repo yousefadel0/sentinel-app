@@ -65,17 +65,15 @@ def test_tier_c_caps_auto_act_at_notify_only_even_at_score_099():
     assert any(e.name == "tier_c_never_auto_act" for e in d.audit_events)
 
 
-def test_tier_b_090_094_is_auto_throttle_not_human_and_block_becomes_throttle():
-    """Clarification 1 pinned verbatim: B between 0.90–0.94 gets throttled
-    automatically (never blocked); NOT downgraded to human approval."""
+def test_tier_b_between_80_and_95_requires_approval():
+    """Confidence below 95% enters the approval band even with Tier B evidence."""
     eng, _ = engine()
     a = alert("auth_fail_burst", 0.93, tier=ConfidenceTier.B, crit="critical")
     d = eng.evaluate(IncidentStub([a]), Facts(liveness="alive"),
                      severity_override=5)   # push into the 0.90-0.94 window
     assert 0.90 <= d.score < 0.95
-    assert d.outcome is Outcome.AUTO_THROTTLE
-    assert d.recommendation.action == "throttle_src"   # block -> throttle_src
-    assert d.cap_applied == "tier_b_throttle_cap"
+    assert d.outcome is Outcome.HUMAN_APPROVAL
+    assert d.recommendation.action == "block_ip_temp"
 
 
 def test_tier_b_at_or_above_095_still_never_blocks():
@@ -342,6 +340,17 @@ def test_engine_never_invents_facts_default_is_unknown_liveness():
                for e in d.audit_events)
 
 
+def test_dry_run_simulation_shows_tier_without_claiming_live_flow():
+    eng, _ = engine()
+    d = eng.evaluate(
+        IncidentStub([alert("auth_fail_burst", 0.93, crit="critical")]),
+        Facts(liveness="unknown", dry_run_simulation=True))
+    assert d.outcome is Outcome.HUMAN_APPROVAL
+    assert d.inputs["liveness"] == "unknown"
+    assert d.inputs["dry_run_simulation"] is True
+    assert any(e.name == "dry_run_liveness_unverified" for e in d.audit_events)
+
+
 def test_severity_override_is_the_phase2_siem_seam():
     eng, _ = engine()
     d_default = eng.evaluate(
@@ -351,8 +360,8 @@ def test_severity_override_is_the_phase2_siem_seam():
         IncidentStub([alert("scan", 0.99, crit="critical")]),
         Facts(liveness="alive"), severity_override=5)          # SIEM enrich
     assert d_default.score < d_boosted.score
-    assert d_default.outcome is Outcome.LOG_ONLY               # 0.396
-    assert d_boosted.outcome is Outcome.AUTO_ACT               # 0.99
+    assert d_default.outcome is Outcome.AUTO_ACT
+    assert d_boosted.outcome is Outcome.AUTO_ACT
 
 
 def test_empty_incident_refused():

@@ -1,11 +1,12 @@
-# Sentinel live stack — SPAN-fed Suricata + Zeek write into a shared volume;
-# Sentinel tails it in SHADOW mode (never inline, never actuates).
+# Default starts Sentinel in observe-only mode. Add --profile capture after
+# configuring a Linux SPAN/TAP interface and the protected addresses.
 #
 #   CAPTURE_IFACE=eth1 docker compose up -d
 #
 # Capture NICs must be attached with no IP (SPAN/TAP, Project.md §3).
 services:
   suricata:
+    profiles: [capture]
     image: jasonish/suricata:latest
     network_mode: host
     cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
@@ -15,6 +16,7 @@ services:
     restart: unless-stopped
 
   zeek:
+    profiles: [capture]
     image: zeek/zeek:latest
     network_mode: host
     cap_add: [NET_ADMIN, NET_RAW]
@@ -28,13 +30,18 @@ services:
     build:
       context: .
       dockerfile: infra/Dockerfile
-    depends_on: [suricata, zeek]
+    network_mode: host
     # Suricata writes eve.json and Zeek writes *.log into the same volume.
     command: ["--config", "/etc/sentinel/config.yaml", "run",
-              "--capture-dir", "/logs"]
+              "--capture-dir", "/logs", "--ui"]
+    environment:
+      SENTINEL_OPS_UI_TOKEN: ${SENTINEL_OPS_UI_TOKEN:-}
+      SENTINEL_LLM_API: ${SENTINEL_LLM_API:-}
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      SENTINEL_SOAR_TOKEN: ${SENTINEL_SOAR_TOKEN:-}
     volumes:
       - sensor-logs:/logs
-      - ./config.yaml:/etc/sentinel/config.yaml:ro
+      - ${SENTINEL_CONFIG_FILE:-./config.container.yaml}:/etc/sentinel/config.yaml:ro
       - sentinel-data:/var/lib/sentinel
     restart: unless-stopped
 

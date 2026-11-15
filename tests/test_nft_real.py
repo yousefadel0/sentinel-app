@@ -100,7 +100,8 @@ def test_executor_to_real_kernel_end_to_end(tmp_path, act):
     now = [1000.0]
     ex = Executor(store=store, validator=Validator(config_view()),
                   actuators={"nftables_local": act}, autonomy_level=lambda: 1,
-                  dry_run=False, clock=lambda: now[0])
+                  dry_run=False, clock=lambda: now[0],
+                  liveness_check=lambda ctx: "alive")  # test sensor
     ctx = {"incident_id": d.incident_id, "src_ip": "198.51.100.7", "dst_ip": "10.0.0.99"}
     assert ex.handle(resolved, ctx, "approved") == "executed"
     assert "198.51.100.7" in _nft("list", "set", "ip", TABLE, "blocked")

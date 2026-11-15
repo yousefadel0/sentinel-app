@@ -68,7 +68,8 @@ def test_ui_route_row_matches_cli_seam_row(frozen_now, monkeypatch,
     eng_a, _, d_a = _pending(engine_factory)
     db_a = tmp_path / "cli.sqlite"
     store_a = Store(db_a)
-    resolved_a = eng_a.resolve(d_a.incident_id, True)
+    resolved_a = eng_a.resolve(d_a.incident_id, True,
+                               actor="ops_ui_authenticated")
     _cli_record(store_a, resolved_a)
 
     # -- path B: Ops UI route ------------------------------------------- #

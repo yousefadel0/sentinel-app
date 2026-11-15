@@ -27,6 +27,7 @@ TOP_LEVEL_KEYS = (
     "brain",
     "actuators",
     "autonomy_level",
+    "enforcement_dry_run",
     "limits",
     "ops_ui",  # M7 module block; validated here since it is part of §8 schema
     "audit_store",  # M6 (D5): optional SQLite append-only audit store path
@@ -37,6 +38,7 @@ TOP_LEVEL_KEYS = (
 )
 
 SCHEMA: dict[str, dict] = {
+    "enforcement_dry_run": {"type": bool, "required": False},
     "site": {
         "type": dict,
         "required": True,
@@ -57,6 +59,9 @@ SCHEMA: dict[str, dict] = {
                     }
                 },
             },
+            "protected_ips": {"type": list, "required": False,
+                              "constraints": {"item_type": str,
+                                              "item_constraints": {"ipv4": True}}},
             # Important assets that are NOT G1-protected (weights the score only).
             "assets": {
                 "type": list,
@@ -192,6 +197,17 @@ SCHEMA: dict[str, dict] = {
                                    "constraints": {"min": 0.5, "max": 1.0}},
             "human_approval_threshold": {"type": (int, float), "required": False,
                                          "constraints": {"min": 0.1, "max": 1.0}},
+            "report_threshold": {"type": (int, float), "required": False,
+                                  "constraints": {"min": 0.1, "max": 1.0}},
+            "approval_timeout_minutes": {"type": int, "required": False,
+                                         "constraints": {"min": 1, "max": 60}},
+            "report_timeout_minutes": {"type": int, "required": False,
+                                       "constraints": {"min": 1, "max": 120}},
+            "report_fallback_actions": {
+                "type": list, "required": False,
+                "constraints": {"min_len": 1, "item_type": str,
+                                "item_constraints": {"enum": (
+                                    "throttle_src", "block_ip_temp")}}},
         },
     },
     "critical_response": {
@@ -276,6 +292,8 @@ SCHEMA: dict[str, dict] = {
 }
 
 CROSS_FIELD_RULES = (
+    ("policy.report_threshold", "<=", "policy.human_approval_threshold",
+     "report threshold must not exceed the approval threshold"),
     ("policy.human_approval_threshold", "<=", "policy.auto_act_threshold",
      "approval threshold must not exceed the auto-act threshold"),
     ("brain.hard_cutoff_s", "<=", "brain.timeout_s",

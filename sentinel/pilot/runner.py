@@ -160,10 +160,11 @@ def _config_view(cfg):
     limits = cfg["limits"]
     policy = cfg.get("policy") or {}
     auto_t = float(policy.get("auto_act_threshold", 0.95))
-    human_t = float(policy.get("human_approval_threshold", 0.70))
-    if human_t > auto_t:
+    human_t = float(policy.get("human_approval_threshold", 0.80))
+    report_t = float(policy.get("report_threshold", 0.50))
+    if report_t > human_t or human_t > auto_t:
         raise ConfigError("policy.human_approval_threshold exceeds "
-                          "policy.auto_act_threshold")
+                          "policy.auto_act_threshold or report threshold exceeds approval")
     cr = cfg.get("critical_response") or {}
     crit_min, crit_window = 2.0, 900
     if cr.get("enabled"):
@@ -172,7 +173,13 @@ def _config_view(cfg):
     return ConfigView(
         critical_min_score=crit_min, critical_window_s=crit_window,
         auto_threshold=auto_t, human_threshold=human_t,
+        report_threshold=report_t,
+        approval_window_s=int(policy.get("approval_timeout_minutes", 15)) * 60,
+        report_window_s=int(policy.get("report_timeout_minutes", 30)) * 60,
+        report_fallback_actions=tuple(policy.get("report_fallback_actions",
+                                                  ["throttle_src"])),
         critical_assets=crit_ips,
+        protected_ips=frozenset(str(ip) for ip in cfg["site"].get("protected_ips", [])),
         monitored_vlans=frozenset(str(v) for v in cfg["monitored_vlans"]),
         asymmetric_risk=str(cfg["placement"]["asymmetric_risk"]),
         max_blocks_per_min=int(limits["max_blocks_per_min"]),

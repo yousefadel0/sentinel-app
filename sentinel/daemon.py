@@ -18,7 +18,7 @@ import queue
 import threading
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Sequence
@@ -135,6 +135,10 @@ class LockedEngine:
         with self._lock:
             return dict(self._engine.pending_approvals())
 
+    def restore_pending(self, decision):
+        with self._lock:
+            self._engine.restore_pending(decision)
+
 
 class Daemon:
     """One poll = ``run_once()``; ``run()`` loops until ``stop`` is set."""
@@ -150,8 +154,14 @@ class Daemon:
                  export_every_s: float = 10.0,
                  metrics_path: Path | None = None,
                  executor: Executor | None = None,
-                 watch: CriticalWatch | None = None) -> None:
+                 watch: CriticalWatch | None = None,
+                 liveness_check: Callable[[dict], str] | None = None,
+                 learning=None, intel=None, cve_intel=None) -> None:
         self._watch = watch
+        self._learning = learning
+        self._intel = intel
+        self._cve_intel = cve_intel
+        self._liveness_check = liveness_check
         self._executor = executor
         self._metrics_path = Path(metrics_path) if metrics_path else None
         self._hub, self._exporter = hub, exporter
@@ -180,17 +190,23 @@ class Daemon:
         """Poll sources, correlate, decide escalated incidents. Returns the
         number of decisions recorded this cycle."""
         fresh: list[Alert] = []
+        if self._intel is not None:
+            self._intel.maybe_refresh()
         for src in self._sources:
             try:
                 fresh.extend(src.fetch())
             except Exception as exc:     # P4: a bad source never stops the loop
                 log.warning("source_fetch_failed",
                             source=getattr(src, "name", "?"), error=str(exc))
+        anomalies = self._learning.anomalies(fresh) if self._learning is not None else []
+        if self._learning is not None:
+            self._learning.observe(fresh)
         # Raw flow/dns records feed the behavioral detectors; only
         # incident-worthy alerts (signature hits, detector output) correlate.
         self._detectors.ingest(fresh)
         self._buffer.extend(a for a in fresh if is_incident_worthy(a))
         self._buffer.extend(self._detectors.detect())
+        self._buffer.extend(anomalies)
         self._prune()
         made = 0
         for inc in self._corr.correlate(self._buffer):
@@ -233,15 +249,40 @@ class Daemon:
                          if k[2] in live_firsts}
 
     def _decide(self, incident) -> None:
-        # Liveness is not yet derived from Zeek conn state; "alive" matches
-        # the pilot and keeps the daemon shadow-only (nothing executes).
-        decision = self._engine.evaluate(incident, Facts(liveness="alive"))
+        ctx = {"incident_id": incident.incident_id,
+               "src_ip": incident.src_ip, "dst_ip": incident.dst_ip}
+        # Sensor logs alone do not establish a currently live flow.
+        try:
+            liveness = (self._liveness_check(ctx)
+                        if self._liveness_check is not None else "unknown")
+        except Exception:
+            liveness = "unknown"
+        if liveness not in ("alive", "stale", "unknown"):
+            liveness = "unknown"
+        simulation = bool(self._executor and self._executor.dry_run
+                          and liveness == "unknown")
+        decision = self._engine.evaluate(
+            incident, Facts(liveness=liveness, dry_run_simulation=simulation))
+        if self._intel is not None:
+            match = self._intel.match(incident.signals)
+            if match is not None:
+                decision = replace(decision, inputs={
+                    **decision.inputs,
+                    "mitre_technique_ids": match["technique_ids"],
+                    "mitre_catalog_source": match["catalog_source"],
+                    "mitre_mapping_confidence": match["confidence"],
+                })
+        if self._cve_intel is not None:
+            cves = self._cve_intel.match(incident.signals)
+            if cves:
+                decision = replace(decision, inputs={
+                    **decision.inputs, "cve_ids": [row["cve_id"] for row in cves],
+                    "cve_context": cves})
         self._record(decision, "live")
         self._record_context(incident)
         self._store.record_incident_inputs(incident_id=decision.incident_id,
                                            inputs=dict(decision.inputs))
-        ctx = {"incident_id": decision.incident_id,
-               "src_ip": incident.src_ip, "dst_ip": incident.dst_ip}
+        ctx["incident_id"] = decision.incident_id
         if self._executor is not None:
             self._executor.handle(decision, ctx, "auto")
         if self._watch is not None:
@@ -291,7 +332,8 @@ class Daemon:
         self._store.record_incident_context(
             incident_id=incident.incident_id,
             src_ip=incident.src_ip, dst_ip=incident.dst_ip,
-            attack_type=(mapping.attack_type if mapping else ""),
+            attack_type=(mapping.attack_type if mapping else
+                         "Baseline anomaly" if "baseline_anomaly" in incident.signals else "Unmapped event"),
             signals=list(incident.signals),
             alert_count=len(incident.alerts),
             first_ts=incident.first_ts, last_ts=incident.last_ts,
@@ -326,7 +368,8 @@ class Daemon:
                     self._watch.ack(approval_id, "telegram")
                 continue
             try:
-                decision = self._engine.resolve(approval_id, approved)
+                decision = self._engine.resolve(approval_id, approved,
+                                                actor="telegram_engineer")
             except KeyError:
                 continue                 # stale/unknown id: nothing to do
             if self._watch is not None:
@@ -429,7 +472,13 @@ class Daemon:
                "enforcement": {"dry_run": True if ex is None else ex.dry_run,
                                "executed": 0 if ex is None else ex.executed,
                                "active": [] if ex is None else ex.active()},
+               "notifications": {"channels": 0 if self._hub is None else len(self._hub._senders),
+                                 "delivered": 0 if self._hub is None else self._hub.delivered,
+                                 "failed": 0 if self._hub is None else self._hub.failures},
                "sources": self.health()}
+        if self._learning is not None:
+            doc["learning"] = self._learning.export()
+            doc["mode"] = self._learning.mode
         try:
             tmp = self._health_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
@@ -440,27 +489,42 @@ class Daemon:
     # -- loop ----------------------------------------------------------- #
 
     def run(self, stop: threading.Event, poll_interval_s: float = 1.0) -> None:
-        log.info("daemon_started", sources=len(self._sources), mode="shadow")
+        log.info("daemon_started", sources=len(self._sources),
+                 dry_run=True if self._executor is None else self._executor.dry_run)
         if self._approvals is not None:
             self._approvals.start(self._resolutions)
-        while not stop.is_set():
-            self.run_once()
-            self.write_health()
-            self.write_metrics()
-            stop.wait(poll_interval_s)
-        if self._approvals is not None:
-            self._approvals.stop()
-        if self._hub is not None:
-            self._hub.close()
-        log.info("daemon_stopped", cycles=self.cycles, decisions=self.decisions)
+        try:
+            while not stop.is_set():
+                self.run_once()
+                self.write_health()
+                self.write_metrics()
+                stop.wait(poll_interval_s)
+        finally:
+            if self._approvals is not None:
+                self._approvals.stop()
+            if self._hub is not None:
+                self._hub.close()
+            if self._triage is not None:
+                self._triage.close()
+            log.info("daemon_stopped", cycles=self.cycles, decisions=self.decisions)
 
 
 def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                  state_path: Path | None = None,
                  start_at_end: bool = False,
-                 dry_run: bool = True) -> Daemon:
+                 dry_run: bool = True,
+                 liveness_check: Callable[[dict], str] | None = None,
+                 learning_path: Path | None = None,
+                 intel_path: Path | None = None,
+                 cve_path: Path | None = None) -> Daemon:
     """Wire a shadow daemon from a validated config + a sensor log directory."""
     capture_dir = Path(capture_dir)
+    from sentinel.learning import LearningProfile
+    learning = LearningProfile(learning_path) if learning_path is not None else None
+    from sentinel.threatintel.attack import AttackIntel
+    intel = AttackIntel(intel_path) if intel_path is not None else None
+    from sentinel.threatintel.vulnerabilities import CveIntel
+    cve_intel = CveIntel(cve_path) if cve_path is not None else None
     state = OffsetStore(state_path or capture_dir / ".sentinel-offsets.json")
     sources: list[DataSource] = []
     hints = asset_hints(cfg)
@@ -481,7 +545,10 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                                  int(limits["max_blocks_per_hour"])),
         controller=controller,
     ))
-    executor = _build_executor(cfg, config_view, store, controller, dry_run)
+    executor = _build_executor(cfg, config_view, store, controller, dry_run,
+                               liveness_check=liveness_check,
+                               can_act=(lambda: learning.mode == "active")
+                               if learning is not None else None)
     hub, approvals = _build_notifiers(cfg)
     siem = cfg.get("siem") or {}
     exporter = None
@@ -510,14 +577,53 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
                   health_path=capture_dir / "live-health.json",
                   triage=triage, hub=hub, exporter=exporter,
                   approvals=approvals, executor=executor,
-                  metrics_path=capture_dir / "sentinel.prom")
-    if cr.get("enabled"):
-        daemon._watch = CriticalWatch(
-            store=store, engine=engine, hub=hub, executor=executor,
-            clock=_utcnow, record_decision=daemon._record,
-            auto_remediate=bool(cr.get("auto_remediate_on_timeout", True)),
-            reminder_s=int(cr.get("reminder_minutes", 5)) * 60)
+                  metrics_path=capture_dir / "sentinel.prom",
+                  liveness_check=liveness_check, learning=learning, intel=intel,
+                  cve_intel=cve_intel)
+    daemon._watch = CriticalWatch(
+        store=store, engine=engine, hub=hub, executor=executor,
+        clock=_utcnow, record_decision=daemon._record,
+        auto_remediate=bool(cr.get("auto_remediate_on_timeout", True)),
+        reminder_s=int(cr.get("reminder_minutes", 5)) * 60)
+    _restore_pending(store, engine, daemon._watch)
     return daemon
+
+
+def _restore_pending(store: Store, engine: LockedEngine, watch: CriticalWatch) -> None:
+    """Rebuild only unresolved, audited approvals with their original deadlines."""
+    from sentinel.decision.models import AuditEvent, Decision, Outcome, Recommendation
+    from sentinel.timeutil import parse_iso
+
+    rows = store.query(
+        "SELECT d.incident_id, d.outcome, d.base_score, d.score, d.tier, "
+        "d.cap_applied, d.would, d.recommendation, d.audit_events "
+        "FROM decisions d WHERE d.id = "
+        "(SELECT MAX(id) FROM decisions WHERE incident_id = d.incident_id) "
+        "AND d.outcome IN ('human_approval', 'report_wait')")
+    for iid, outcome, base, score, tier, cap, would, raw_rec, raw_events in rows:
+        try:
+            data = store.query("SELECT inputs FROM incident_inputs WHERE "
+                               "incident_id=? ORDER BY id DESC LIMIT 1", (iid,))
+            context = store.query("SELECT src_ip, dst_ip FROM incident_context WHERE "
+                                  "incident_id=? ORDER BY id DESC LIMIT 1", (iid,))
+            if not data or not context:
+                raise ValueError("missing incident inputs or context")
+            inputs = json.loads(data[0][0])
+            deadline = parse_iso(inputs["approval_deadline"])
+            rec_data = json.loads(raw_rec)
+            rec = Recommendation(**rec_data) if rec_data else None
+            events = tuple(AuditEvent(**item) for item in json.loads(raw_events))
+            decision = Decision(
+                incident_id=iid, outcome=Outcome(outcome), base_score=base,
+                score=score, tier=tier, cap_applied=cap,
+                audit_events=events, recommendation=rec,
+                approval_deadline=deadline, would=would, inputs=inputs)
+            engine.restore_pending(decision)
+            watch.consider(decision, {"incident_id": iid,
+                                     "src_ip": context[0][0], "dst_ip": context[0][1]})
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            log.warning("pending_restore_skipped", incident_id=iid,
+                        error=type(exc).__name__)
 
 
 def _build_notifiers(cfg: dict):
@@ -538,7 +644,7 @@ def _build_notifiers(cfg: dict):
 
 
 def _build_executor(cfg: dict, config_view, store, controller,
-                    dry_run: bool) -> Executor:
+                    dry_run: bool, *, liveness_check=None, can_act=None) -> Executor:
     """Executor over the actuators named in config. In dry-run (the default)
     actuators are still constructed so intents and health are accurate, but
     the executor never calls them."""
@@ -556,4 +662,5 @@ def _build_executor(cfg: dict, config_view, store, controller,
     return Executor(
         store=store, validator=validator, actuators=actuators,
         autonomy_level=lambda: controller.level, dry_run=dry_run,
-        max_per_hour=int(cfg["limits"]["max_blocks_per_hour"]))
+        max_per_hour=int(cfg["limits"]["max_blocks_per_hour"]),
+        liveness_check=liveness_check, can_act=can_act)

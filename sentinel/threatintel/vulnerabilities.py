@@ -4,12 +4,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from sentinel.logging_setup import get_logger
+
 CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 NVD_CVE_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+log = get_logger("sentinel.threatintel.cve")
 
 
 def extract_cve_ids(value: Any) -> list[str]:
@@ -75,3 +81,75 @@ def lookup_nvd_cve(cve_id: str, *, api_key: str | None = None,
         "source": "NIST National Vulnerability Database API 2.0",
         "url": f"https://nvd.nist.gov/vuln/detail/{cve}",
     }
+
+
+class CveIntel:
+    """Observed CVE IDs resolve from a local cache; NVD refresh stays off path."""
+
+    def __init__(self, path: str | Path, *, lookup=None,
+                 clock=None, refresh_seconds: int = 86400) -> None:
+        self.path = Path(path)
+        self._lookup = lookup or lookup_nvd_cve
+        self._clock = clock or time.time
+        self._refresh_seconds = max(3600, int(refresh_seconds))
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            self._cache = ({key: row for key, row in data.items()
+                            if isinstance(key, str) and CVE_PATTERN.fullmatch(key)
+                            and isinstance(row, dict)
+                            and isinstance(row.get("updated_at"), (int, float))
+                            and isinstance(row.get("value"), dict)}
+                           if isinstance(data, dict) else {})
+        except (OSError, ValueError):
+            self._cache = {}
+        self._attempts: dict[str, float] = {}
+        self._pending: set[str] = set()
+        self._lock = threading.RLock()
+        self._worker: threading.Thread | None = None
+
+    def match(self, signals: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+        ids = extract_cve_ids(signals)[:100]
+        now = self._clock()
+        with self._lock:
+            result = []
+            for cve in ids:
+                row = self._cache.get(cve)
+                result.append(dict(row["value"]) if isinstance(row, dict) and
+                              isinstance(row.get("value"), dict) else
+                              {"cve_id": cve, "found": None})
+                updated = row.get("updated_at", 0) if isinstance(row, dict) else 0
+                if now - updated >= self._refresh_seconds and \
+                        now - self._attempts.get(cve, 0) >= self._refresh_seconds:
+                    self._pending.add(cve)
+            if self._pending and (self._worker is None or not self._worker.is_alive()):
+                self._worker = threading.Thread(target=self._refresh, daemon=True,
+                                                name="nvd-cve-refresh")
+                self._worker.start()
+            return result
+
+    def _refresh(self) -> None:
+        while True:
+            with self._lock:
+                if not self._pending:
+                    self._worker = None
+                    return
+                cve = self._pending.pop()
+                self._attempts[cve] = self._clock()
+            try:
+                value = self._lookup(cve)
+            except Exception as exc:
+                log.warning("cve_refresh_failed", cve_id=cve,
+                            error=type(exc).__name__)
+                continue  # last good cache remains available offline
+            with self._lock:
+                self._cache[cve] = {"updated_at": self._clock(), "value": value}
+                if len(self._cache) > 10_000:
+                    oldest = min(self._cache, key=lambda k: self._cache[k].get("updated_at", 0))
+                    del self._cache[oldest]
+                try:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    temp = self.path.with_suffix(self.path.suffix + ".tmp")
+                    temp.write_text(json.dumps(self._cache, sort_keys=True), encoding="utf-8")
+                    os.replace(temp, self.path)
+                except OSError as exc:
+                    log.warning("cve_cache_write_failed", error=type(exc).__name__)

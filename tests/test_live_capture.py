@@ -80,6 +80,15 @@ def _eve(ts: str, sig: str = "scan", src="203.0.113.7", dst="192.168.4.11",
     return json.dumps(ev) + "\n"
 
 
+def test_suricata_signature_cve_id_is_preserved_as_evidence_signal(tmp_path):
+    path = tmp_path / "eve.json"
+    path.write_text(_eve("2026-10-20T08:00:01+0000",
+                         alert={"signature": "test CVE-2024-12345",
+                                "severity": 2, "confidence": 0.9}))
+    alerts = LiveEveDataSource(path).fetch()
+    assert "cve:CVE-2024-12345" in alerts[0].signals
+
+
 def test_live_eve_incremental_stats_and_malformed(tmp_path):
     f = tmp_path / "eve.json"
     src = LiveEveDataSource(f, signal_key="sentinel_signal")
@@ -158,6 +167,22 @@ def test_daemon_decides_once_then_only_on_escalation(tmp_path):
     d.write_health()
     health = json.loads((tmp_path / "live-health.json").read_text())
     assert health["mode"] == "live_shadow" and health["decisions"] == 3
+    store.close()
+
+
+def test_dry_run_daemon_shows_approval_without_inventing_live_liveness(tmp_path):
+    now = [datetime(2026, 10, 20, 8, 0, 30, tzinfo=timezone.utc)]
+    d, store = _daemon(tmp_path, now)
+    _append(tmp_path / "eve.json", _eve("2026-10-20T08:00:01+0000",
+                                        sig="auth_fail_burst"))
+    assert d.run_once() == 1
+    decision = store.rows("decisions")[0]
+    assert decision["outcome"] == "human_approval"
+    assert "dry_run_liveness_unverified" in decision["audit_events"]
+    inputs = json.loads(store.rows("incident_inputs")[0]["inputs"])
+    assert inputs["liveness"] == "unknown" and inputs["dry_run_simulation"]
+    assert d._engine.pending_approvals()
+    assert not any(a["executed"] for a in store.rows("actions"))
     store.close()
 
 

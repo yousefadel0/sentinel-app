@@ -37,6 +37,14 @@ def test_valid_config_loads_clean(valid_config_path):
     assert cfg["limits"]["default_ttl_min"] == 30
 
 
+def test_protected_ip_list_validates_each_address(valid_config_path):
+    import yaml
+    raw = yaml.safe_load(valid_config_path.read_text())
+    raw["site"]["protected_ips"] = ["10.0.0.1", "not-an-ip"]
+    with pytest.raises(ConfigError, match=r"protected_ips\[1\].*valid IPv4"):
+        validate_config(raw)
+
+
 @pytest.mark.parametrize("fixture_name", sorted(FAILURE_CLASSES))
 def test_invalid_config_refuses_boot_with_clear_error(invalid_dir, fixture_name):
     path = invalid_dir / fixture_name

@@ -61,9 +61,14 @@ class ConfigView:
     max_blocks_per_hour: int
     autonomy_level: int
     auto_threshold: float = 0.90     # unit-test default; configs pass policy
-    human_threshold: float = 0.70
+    human_threshold: float = 0.80
+    report_threshold: float = 0.50
+    approval_window_s: int = APPROVAL_WINDOW_S
+    report_window_s: int = 1800
     critical_min_score: float = 2.0  # > 1.0 = no critical class (default off)
     critical_window_s: int = APPROVAL_WINDOW_S
+    protected_ips: frozenset[str] = frozenset()
+    report_fallback_actions: tuple[str, ...] = ("throttle_src",)
 
 
 class _IncidentLike(Protocol):
@@ -102,6 +107,8 @@ class DecisionEngine:
             return "auto"
         if score >= self._cfg.human_threshold:
             return "human"
+        if self._cfg.report_threshold and score >= self._cfg.report_threshold:
+            return "report"
         return "log_only"
 
     @staticmethod
@@ -249,6 +256,10 @@ class DecisionEngine:
             if row.name == "liveness":
                 if facts.liveness == "alive":
                     continue
+                if facts.dry_run_simulation and facts.liveness == "unknown":
+                    events.append(AuditEvent("dry_run_liveness_unverified",
+                                             "recommendation only; no live-flow proof"))
+                    continue
                 audit_name = (
                     "stale_session_drift"
                     if facts.liveness == "stale"
@@ -256,7 +267,8 @@ class DecisionEngine:
                 )
                 override = "log_only"
             elif row.name == "critical_assets":
-                if dst_ip not in self._cfg.critical_assets or \
+                if dst_ip not in (self._cfg.critical_assets |
+                                  self._cfg.protected_ips) or \
                         original_action not in AGGRESSIVE_ACTIONS:
                     continue
                 audit_name = row.audit_name   # critical_asset_allowlist_hit
@@ -295,7 +307,7 @@ class DecisionEngine:
         base_rec = recommend(attack_type)
         if outcome is Outcome.LOG_ONLY:
             return None, (
-                f"would log only because score fell below the "
+                f"would log only because confidence fell below the "
                 f"{self._cfg.human_threshold:.2f} band; "
                 f"playbook {base_rec.action} not proposed"
             )
@@ -317,6 +329,7 @@ class DecisionEngine:
             Outcome.AUTO_ACT: "would auto-act",
             Outcome.AUTO_THROTTLE: "would auto-throttle",
             Outcome.HUMAN_APPROVAL: "would act after human approval",
+            Outcome.REPORT_WAIT: "would report and wait for human",
             Outcome.ESCALATE_HUMAN: "would escalate to human",
             Outcome.NOTIFY_ONLY: "would notify only",
         }[outcome]
@@ -346,11 +359,12 @@ class DecisionEngine:
                                    for v in vlans))
         deltas, pre_events, fired_pre = self._run_pre_band(facts)
         score = apply_penalties(base, deltas)          # D1: clamp BEFORE banding
-        banded = self._band(score)
+        banded = self._band(conf)
 
         outcome = {
             "auto": Outcome.AUTO_ACT,
             "human": Outcome.HUMAN_APPROVAL,
+            "report": Outcome.REPORT_WAIT,
             "log_only": Outcome.LOG_ONLY,
         }[banded]
 
@@ -398,9 +412,11 @@ class DecisionEngine:
         deadline = None
         is_critical = (chained_outcome is Outcome.HUMAN_APPROVAL
                        and score >= self._cfg.critical_min_score)
-        if chained_outcome is Outcome.HUMAN_APPROVAL:
-            window = (self._cfg.critical_window_s if is_critical
-                      else APPROVAL_WINDOW_S)
+        if chained_outcome in (Outcome.HUMAN_APPROVAL, Outcome.REPORT_WAIT):
+            window = (self._cfg.report_window_s
+                      if chained_outcome is Outcome.REPORT_WAIT else
+                      self._cfg.critical_window_s if is_critical
+                      else self._cfg.approval_window_s)
             deadline = now + timedelta(seconds=window)
 
         decision = Decision(
@@ -422,9 +438,14 @@ class DecisionEngine:
                 "attack_type": attack_type.value,
                 "penalties": [round(d, 3) for d in deltas],
                 "critical": bool(is_critical),
+                "approval_deadline": deadline.isoformat() if deadline else None,
+                "fallback_actions": (list(self._cfg.report_fallback_actions)
+                                     if chained_outcome is Outcome.REPORT_WAIT else []),
+                "liveness": facts.liveness,
+                "dry_run_simulation": facts.dry_run_simulation,
             },
         )
-        if chained_outcome is Outcome.HUMAN_APPROVAL:
+        if chained_outcome in (Outcome.HUMAN_APPROVAL, Outcome.REPORT_WAIT):
             self._pending[incident.incident_id] = decision
         return decision
 
@@ -438,8 +459,18 @@ class DecisionEngine:
         """
         return dict(self._pending)
 
+    def restore_pending(self, decision: Decision) -> None:
+        """Restore an audited, unresolved approval after process restart."""
+        if decision.outcome not in (Outcome.HUMAN_APPROVAL, Outcome.REPORT_WAIT):
+            raise ValueError("only pending human decisions can be restored")
+        if decision.approval_deadline is None:
+            raise ValueError("pending decision has no deadline")
+        self._pending[decision.incident_id] = decision
+
     def resolve(self, approval_id: str, approved: bool, *,
-                by_deadline: bool = False) -> Decision:
+                by_deadline: bool = False, actor: str = "unspecified",
+                action_override: str | None = None,
+                ttl_minutes: int | None = None) -> Decision:
         """Resolve a pending human approval against the INJECTED clock.
 
         After the 15-minute window the verdict degrades to notify_only with
@@ -447,13 +478,29 @@ class DecisionEngine:
         window: approved -> auto_act recorded ("human_approval_granted");
         denied -> notify_only ("human_approval_denied").
         """
+        if action_override is not None:
+            allowed = {"notify_only", "throttle_src", "block_ip_temp",
+                       "quarantine_asset"}
+            if by_deadline or not approved or action_override not in allowed:
+                raise ValueError("invalid approval action override")
+            if ttl_minutes is not None and (type(ttl_minutes) is not int or
+                                            not 1 <= ttl_minutes <= 60):
+                raise ValueError("ttl_minutes must be 1..60")
         try:
             original = self._pending.pop(approval_id)
         except KeyError:
             raise KeyError(f"no pending approval {approval_id!r}") from None
         now = self._clock()
         assert original.approval_deadline is not None  # invariant of creation
-        if by_deadline:
+        if by_deadline and original.tier == "C":
+            # Tier C is never eligible for unattended action, even when a
+            # human-approval decision reaches the critical deadline.
+            outcome, event_name = (Outcome.NOTIFY_ONLY,
+                                   "critical_deadline_tier_c_no_auto")
+        elif by_deadline and original.outcome is Outcome.REPORT_WAIT:
+            outcome, event_name = (Outcome.AUTO_THROTTLE,
+                                   "report_deadline_safe_plan")
+        elif by_deadline:
             # Critical-incident deadline reached with nobody acting: the
             # caller (escalation.CriticalWatch) takes responsibility; every
             # downstream gate (validator, G1, TTL, caps) still applies.
@@ -465,13 +512,24 @@ class DecisionEngine:
         else:
             outcome, event_name = Outcome.NOTIFY_ONLY, "human_approval_denied"
         events = (*original.audit_events,
-                  AuditEvent(event_name, f"resolved at {now.isoformat()}"))
+                  AuditEvent(event_name, f"resolved at {now.isoformat()} by {actor}"))
         rec = original.recommendation
-        if outcome is Outcome.NOTIFY_ONLY or rec is None:
+        if event_name == "report_deadline_safe_plan":
+            rec = Recommendation(action=self._cfg.report_fallback_actions[0],
+                                 params={"target": "src", "ttl_minutes": 15},
+                                 because="preconfigured bounded fallback after report deadline")
+        elif outcome is Outcome.NOTIFY_ONLY or rec is None:
             rec = Recommendation(
                 action="notify_only", params={},
                 because=f"approval {event_name}; "
                         f"{rec.because if rec else 'no playbook action'}")
+        elif action_override is not None:
+            rec = Recommendation(
+                action=action_override,
+                params=({"target": "dst" if action_override == "quarantine_asset" else "src",
+                         "ttl_minutes": ttl_minutes or 15}
+                        if action_override != "notify_only" else {}),
+                because=f"modified by {actor} from {rec.action}")
         return Decision(
             incident_id=original.incident_id,
             outcome=outcome,
@@ -483,4 +541,8 @@ class DecisionEngine:
             recommendation=rec,
             approval_deadline=None,
             would=f"decision after approval: {outcome.value} — {rec.because}",
+            inputs={**original.inputs, "approved_by": actor,
+                    "modified_action": action_override,
+                    "fallback_actions": (list(self._cfg.report_fallback_actions)
+                                         if event_name == "report_deadline_safe_plan" else [])},
         )

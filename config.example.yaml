@@ -8,6 +8,8 @@ site:
   critical_assets:
     - {ip: "10.0.0.4", hostname: "dc-01"}
     - {ip: "10.0.0.5", hostname: "dns-primary"}
+  # مصادر أو أهداف لا يجوز حظرها آليًا: الإدارة، البوابات، DNS، والخوادم الحرجة.
+  protected_ips: ["10.0.0.1", "10.0.0.4", "10.0.0.5"]
   # أصول مهمة غير محمية: تؤثر في الدرجة فقط (critical|high|medium|low).
   assets:
     - {ip: "10.0.1.10", hostname: "web-01", criticality: high}
@@ -35,12 +37,17 @@ actuators:
 # 0 = مراقبة فقط (لا تنفيذ). 1 = تنفيذ بعد موافقة بشرية. 2 = تلقائي للحالات العالية.
 # لا يتغير تلقائيًا؛ ارفعه بنفسك بعد مراجعة النتائج.
 autonomy_level: 0
+enforcement_dry_run: true
 limits: {max_blocks_per_min: 5, max_blocks_per_hour: 20, default_ttl_min: 30}
 
 # عتبات القرار: فوق auto_act يتصرف النظام وحده (إن سمح المستوى)، وبينهما يطلب موافقة.
 policy:
   auto_act_threshold: 0.95
-  human_approval_threshold: 0.70
+  human_approval_threshold: 0.80
+  report_threshold: 0.50
+  approval_timeout_minutes: 15
+  report_timeout_minutes: 30
+  report_fallback_actions: [throttle_src, block_ip_temp]
 
 # الحالات الحرجة: تنبيه عاجل بمهلة، ثم تصرّف تلقائي إن لم يستجب أحد.
 # لا يتجاوز أي بوابة (المستوى 2 فأعلى، dry-run، المُحقِّق، مدة ≤ 60 دقيقة).

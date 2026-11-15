@@ -127,10 +127,8 @@ def test_evaluation_gate_recall_and_zero_benign_fp():
     assert rep.benign_false_positives == 0
 
 
-def test_critical_asset_target_reaches_the_action_band(tmp_path):
-    """Regression for the 0.405 ceiling: configured critical assets must be
-    known to the engine, so a DDoS on one lands in human approval (>=0.70)
-    instead of log_only; the same flood on an ordinary host stays below."""
+def test_asset_criticality_changes_score_without_changing_confidence_band(tmp_path):
+    """Same DDoS confidence enters approval on both assets; score reflects risk."""
     import yaml
     from pathlib import Path
     from sentinel.auditstore.store import Store
@@ -143,7 +141,8 @@ def test_critical_asset_target_reaches_the_action_band(tmp_path):
     cp = tmp_path / "c.yaml"
     cp.write_text(yaml.safe_dump(cfg))
     store = Store(tmp_path / "a.sqlite")
-    d = build_daemon(load_config(cp), tmp_path, store)
+    d = build_daemon(load_config(cp), tmp_path, store,
+                     liveness_check=lambda ctx: "alive")  # synthetic proof
     base = datetime.now(timezone.utc) - timedelta(seconds=40)
     hdr = ("#fields\tts\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\n"
            "#types\ttime\taddr\tport\taddr\tport\tstring\n")
@@ -162,5 +161,5 @@ def test_critical_asset_target_reaches_the_action_band(tmp_path):
     crit = outcome[by_dst["10.0.0.4"]]
     ordinary = outcome[by_dst["10.0.9.9"]]
     assert crit[0] == "human_approval" and crit[1] >= 0.70
-    assert ordinary[0] == "log_only" and ordinary[1] < 0.70
+    assert ordinary[0] == "human_approval" and ordinary[1] < 0.70
     store.close()

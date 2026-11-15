@@ -8,6 +8,7 @@ vendored htmx file (DP2).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from html import escape
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -15,9 +16,12 @@ from urllib.parse import urlencode
 OUTCOME_AR = {
     "log_only": "تسجيل فقط", "notify_only": "إشعار فقط",
     "human_approval": "بانتظار موافقة", "escalate_human": "تصعيد بشري",
+    "report_wait": "تقرير بانتظار المهندس",
     "auto_act": "إجراء آلي", "auto_throttle": "تقييد آلي",
 }
 ATTACK_AR = {
+    "Baseline anomaly": "شذوذ عن خط الأساس",
+    "Unmapped event": "حدث غير مصنف",
     "Network service discovery": "مسح الشبكة",
     "Brute force": "تخمين كلمات المرور",
     "Network denial of service": "حجب خدمة (DDoS)",
@@ -53,13 +57,17 @@ def label_pill(label: Optional[str]) -> str:
 def origin_pill(origin: Optional[str]) -> str:
     if origin == "replay":
         return pill("degraded", "replay · بيانات مسجلة")
-    return pill("healthy", "حي")
+    return pill("healthy", "ملف مراقَب")
 
 
 def score_bar(score: float) -> str:
     s = max(0.0, min(1.0, float(score)))
     return ('<span class="bar"><i style="width:%.0f%%"></i></span> <b>%.0f%%</b>'
             % (s * 100, s * 100))
+
+
+def confidence_bar(value) -> str:
+    return score_bar(value) if isinstance(value, (int, float)) else e("—")
 
 
 def short(value: str, n: int = 18) -> str:
@@ -71,7 +79,10 @@ def short(value: str, n: int = 18) -> str:
 
 NAV = (("overview", "نظرة عامة"), ("incidents", "الحوادث"),
        ("approvals", "الموافقات"), ("sources", "المصادر"),
-       ("audit", "التدقيق"), ("settings", "الإعدادات"))
+       ("learning", "التعلّم"), ("intel", "MITRE"),
+       ("actions", "الإجراءات"), ("audit", "التدقيق"),
+       ("reports", "التقارير"), ("settings", "الإعدادات"),
+       ("guide", "ابدأ هنا"))
 
 CSS = """
 :root{color-scheme:dark;--bg:#0b1220;--p:#111c2e;--p2:#16243a;--line:#24344d;--tx:#e7eef9;--mu:#9aabc3;--bl:#61a9ff;--gr:#42d392;--am:#f4bd50;--rd:#ff7b8a}
@@ -112,14 +123,32 @@ input,select,textarea{background:#0e1929;border:1px solid var(--line);color:var(
 .cols{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
 .hbar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:13px}.hbar .nm{width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hbar .tr{flex:1;height:9px;background:#223149;border-radius:9px;overflow:hidden}.hbar .tr i{display:block;height:100%;background:var(--bl)}
 .note{color:var(--mu);font-size:12.5px}.warnbox{background:#2b2412;border:1px solid #5b4a1b;border-radius:10px;padding:10px 12px;color:#ffe0a0;font-size:13px}
+:root{--bg:#080f1c;--p:#101b2d;--p2:#15243a;--line:#263951;--tx:#eef5ff;--mu:#94a9c3;--bl:#56c5ef;--gr:#52d8a1;--am:#f4bd65;--rd:#ff7585;--space:16px}
+body{background:radial-gradient(ellipse at 85% -25%,#133056 0,transparent 46%),var(--bg);min-height:100vh;letter-spacing:.01em}
+.top{background:#091421ee;border-bottom:1px solid #2c465d;box-shadow:0 8px 32px #0003}
+.top-in{padding-block:14px}.brand{font-size:21px;letter-spacing:.04em;color:#fff}.brand small{letter-spacing:0}
+nav button{transition:background .18s,color .18s,transform .18s}nav button:hover{transform:translateY(-1px)}
+nav button.on{background:linear-gradient(145deg,#163d59,#17304b);box-shadow:inset 0 0 0 1px #36769a;color:#fff}
+.wrap{padding-block:28px}.card{border-color:#2a3e58;border-radius:16px;background:linear-gradient(155deg,#13223a 0%,#101b2d 65%);box-shadow:0 12px 36px #0002}
+.card h2{font-size:18px;font-weight:700;letter-spacing:.01em}.card .sub{margin-bottom:18px}
+.kpi{min-height:102px;background:linear-gradient(150deg,#182b46,#14243a);border-color:#2a425e;transition:transform .18s,border-color .18s}
+.kpi:hover{transform:translateY(-2px);border-color:#3a7197}.kpi b{font-size:29px}.kpi .small-value{font-size:14px;overflow-wrap:anywhere;margin-top:8px}
+th{color:#9bbddd;text-transform:none}td{line-height:1.55}tr:hover td{background:#1a2f49}
+.btn{transition:background .18s,border-color .18s,transform .18s}.btn:hover{transform:translateY(-1px)}
+:is(button,input,select,textarea,a):focus-visible{outline:2px solid var(--bl);outline-offset:3px}
+.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin-block:14px}
+label{display:block;color:var(--mu);font-size:13px;margin-bottom:12px}label input,label select,label textarea{display:block;color:var(--tx);margin-top:5px}
+.inline-form{display:inline-flex;align-items:end;gap:10px;flex-wrap:wrap;margin:8px 12px 8px 0}.inline-form input{max-width:140px}
+.bar.wide{display:block;width:100%;height:12px;margin:18px 0}.loading{padding:32px;color:var(--mu);text-align:center}
+@media(max-width:750px){.top-in{display:block;padding:12px 18px}.brand{margin-bottom:9px}nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:5px;scrollbar-width:thin}nav button{white-space:nowrap;padding:8px 11px}.mode{display:flex;gap:5px;flex-wrap:wrap;margin-top:10px}.wrap{padding:18px 12px 40px}.card{padding:15px}.grid{grid-template-columns:repeat(auto-fit,minmax(145px,1fr))}.kpi b{font-size:24px}.cols{grid-template-columns:1fr}}
 """
 
 SHELL = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Sentinel | لوحة التحكم</title>
 <script src="/static/htmx.min.js"></script><style>%(css)s</style></head><body>
 <header class="top"><div class="top-in"><div class="brand">Sentinel<small>مركز مراقبة القرارات الأمنية</small></div>
-<nav id="nav">%(nav)s</nav><div class="mode" id="mode" hx-get="/ui/mode" hx-trigger="load, every 20s"></div></div></header>
-<div class="wrap" id="wrap"><main id="view" hx-get="/ui/overview" hx-trigger="load"></main>
+<nav id="nav">%(nav)s</nav><div class="mode" id="mode" hx-get="/ui/mode" hx-trigger="load, refresh, every 20s"></div></div></header>
+<div class="wrap" id="wrap"><main id="view" hx-get="/ui/overview" hx-trigger="load, sentinel-update"><p class="loading" role="status">جارٍ تحميل بيانات Sentinel…</p></main>
 <aside id="drawer" class="drawer" style="display:none"></aside></div>
 <script>
 function openDrawer(){document.getElementById('drawer').style.display='block';document.getElementById('wrap').classList.add('has-drawer')}
@@ -127,7 +156,13 @@ function closeDrawer(){var d=document.getElementById('drawer');d.style.display='
 document.getElementById('nav').addEventListener('click',function(ev){var b=ev.target.closest('button');if(!b)return;
 document.querySelectorAll('#nav button').forEach(function(x){x.classList.remove('on')});b.classList.add('on');closeDrawer()});
 document.body.addEventListener('htmx:afterSwap',function(ev){if(ev.target.id==='drawer'){openDrawer()}});
+document.body.addEventListener('htmx:configRequest',function(ev){var t=sessionStorage.getItem('sentinel-token');if(t)ev.detail.headers['X-Sentinel-Token']=t});
+document.body.addEventListener('htmx:responseError',function(ev){if(ev.target.id==='view'){ev.target.innerHTML='<p class="warnbox" role="alert">تعذر تحميل البيانات. أعد المحاولة.</p>'}});
 document.querySelector('#nav button').classList.add('on');
+var activePage='/ui/overview';
+document.getElementById('nav').addEventListener('click',function(ev){var b=ev.target.closest('button[hx-get]');if(b){activePage=b.getAttribute('hx-get');document.getElementById('view').setAttribute('hx-get',activePage)}});
+async function liveFeed(){try{var r=await fetch('/ui/events',{headers:{'X-Sentinel-Token':sessionStorage.getItem('sentinel-token')||''}});if(!r.ok)return;var reader=r.body.getReader(),decoder=new TextDecoder(),buf='';while(true){var x=await reader.read();if(x.done)break;buf+=decoder.decode(x.value,{stream:true});var parts=buf.split('\\n\\n');buf=parts.pop();for(var part of parts){if(part.startsWith('data:')){htmx.trigger('#view','sentinel-update');htmx.trigger('#mode','refresh')}}}}catch(e){}setTimeout(liveFeed,3000)}
+liveFeed();
 </script></body></html>"""
 
 
@@ -138,11 +173,59 @@ def shell() -> str:
     return SHELL % {"css": CSS, "nav": nav}
 
 
+def login() -> str:
+    return '''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sentinel | دخول</title>
+<style>:root{color-scheme:dark}body{font:16px/1.6 Tahoma,sans-serif;background:#080f1c;color:#eef5ff;
+min-height:100vh;display:grid;place-items:center;margin:0}.box{width:min(92vw,390px);padding:32px;
+border:1px solid #2a425e;border-radius:18px;background:#13223a}h1{margin:0 0 8px}
+p{color:#a5b8cc}input,button{display:block;width:100%;box-sizing:border-box;margin-top:16px;padding:12px;
+border-radius:9px;font:inherit}input{background:#0b1728;border:1px solid #42627e;color:white}
+button{background:#176183;border:0;color:white;cursor:pointer}button:focus-visible,input:focus-visible{
+outline:2px solid #56c5ef;outline-offset:2px}</style></head><body><div class="box">
+<h1>Sentinel</h1><p>أدخل رمز تشغيل لوحة العمليات. يبقى الرمز في هذه التبويبة فقط.</p>
+<form id="login"><label for="token">رمز الوصول</label><input id="token" type="password" required autofocus>
+<button>دخول</button></form><p id="error" role="alert"></p></div>
+<script>document.getElementById('login').addEventListener('submit',async function(ev){ev.preventDefault();
+var token=document.getElementById('token').value;var error=document.getElementById('error');
+try{var response=await fetch('/',{headers:{'X-Sentinel-Token':token}});
+if(!response.ok){error.textContent='رمز غير صحيح أو الخدمة غير متاحة.';return}
+sessionStorage.setItem('sentinel-token',token);var html=await response.text();
+document.open();document.write(html);document.close()}
+catch(e){error.textContent='تعذر الاتصال بالخدمة.'}});</script></body></html>'''
+
+
 def mode_badge(mode: dict) -> str:
-    if mode.get("live"):
-        txt = "حي · shadow" if mode.get("daemon_fresh") else "حي · الـ daemon متوقف"
-        return pill("healthy" if mode.get("daemon_fresh") else "down", txt)
-    return pill("degraded", "عرض بيانات مسجلة (replay)")
+    if not mode.get("available"):
+        return pill("degraded", "لا توجد حالة تشغيل حية")
+    if not mode.get("fresh"):
+        return pill("down", "الـ daemon متوقف أو حالته متأخرة")
+    state = mode.get("mode")
+    if state == "learning":
+        learning = mode.get("learning") or {}
+        total = int(learning.get("learning_days", 14)) + int(learning.get("extend_days", 0))
+        phase = "تعلّم %s/%s يوم" % (e(learning.get("observed_days", "—")), total)
+    elif state == "active":
+        phase = "Active"
+    elif state == "live_shadow":
+        phase = "حي · shadow"
+    elif state == "live_enforcing":
+        phase = "Active"
+    else:
+        phase = "الوضع غير محدد"
+    enforcement = mode.get("enforcement") or {}
+    dry = enforcement.get("dry_run")
+    posture = ("dry-run" if dry is True else
+               "تنفيذ فعلي" if dry is False else "حالة التنفيذ غير معروفة")
+    sources = mode.get("sources") or []
+    unhealthy = sum(s.get("status") != "healthy" for s in sources)
+    health = "المصادر %s/%s متأثرة" % (unhealthy, len(sources)) if sources else "لا مصادر"
+    channels = (mode.get("notifications") or {}).get("channels")
+    notices = "قنوات التنبيه %s" % e(channels) if channels is not None else "قنوات غير معروفة"
+    return " ".join((pill("healthy" if state != "learning" else "degraded", phase),
+                     pill("degraded" if dry else "down", posture),
+                     pill("healthy" if unhealthy == 0 and sources else "degraded", health),
+                     pill("healthy" if channels else "degraded", notices)))
 
 
 # -- overview -------------------------------------------------------------- #
@@ -177,7 +260,8 @@ def _timeline(points) -> str:
             % (w, h, h, bars, e(points[0]["t"][:16]), e(points[-1]["t"][:16])))
 
 
-def overview(ov: dict, readiness: dict, kp: dict, pending: int) -> str:
+def overview(ov: dict, readiness: dict, kp: dict, pending: int,
+             recent: list | None = None, learning: dict | None = None) -> str:
     def kpi(title, value, sub="", tone=""):
         return ('<div class="kpi %s"><span>%s</span><b>%s</b><small>%s</small></div>'
                 % (tone, e(title), e(value), e(sub)))
@@ -185,9 +269,9 @@ def overview(ov: dict, readiness: dict, kp: dict, pending: int) -> str:
     fp = ov["analyst_fp_rate"]
     lat = ov["latency"]
     lat_val = "—" if lat["median_s"] is None else "%s ث" % lat["median_s"]
-    lat_sub = ("الوسيط من أول دليل إلى القرار · %d حادثة حية · p90 %s ث"
+    lat_sub = ("الوسيط من أول دليل إلى القرار · %d حادثة من ملفات المراقبة · p90 %s ث"
                % (lat["n"], lat["p90_s"])) if lat["n"] else \
-        "لا توجد حوادث حية بعد؛ لا يُحسب رقم بدل الأرقام الحقيقية"
+        "لا توجد حوادث من ملفات المراقبة بعد؛ لا يُحسب رقم بدل الأرقام الحقيقية"
     kpis = "".join((
         kpi("زمن الاستجابة الفعلي", lat_val, lat_sub),
         kpi("الحوادث", ov["incidents"], "حادثة فريدة في السجل"),
@@ -220,20 +304,46 @@ def overview(ov: dict, readiness: dict, kp: dict, pending: int) -> str:
         '<button class="btn%s" hx-get="/ui/overview?origin=%s" hx-target="#view">%s (%d)</button> '
         % (" btn-go" if ov["origin"] == key else "", key, label, n)
         for key, label, n in (("", "الكل", oc["live"] + oc["replay"]),
-                              ("live", "حي", oc["live"]),
+                              ("live", "ملفات مراقبة", oc["live"]),
                               ("replay", "replay", oc["replay"])))
     if ov["origin"] == "replay" or (not ov["origin"] and oc["replay"]):
         banner = ('<div class="warnbox" style="margin-bottom:12px">هذه الأرقام تشمل حوادث <b>replay</b>: '
-                  'ملفات مسجلة أو بيانات اصطناعية من الـ pilot، وليست ترافيك شبكتك الحي. '
-                  'اختر "حي" لترى ما رصده الحساس فعلًا.</div>')
+                  'ملفات مسجلة أو بيانات اصطناعية من الـ pilot. ملفات المراقبة نفسها قد تحتوي محاكاة؛ '
+                  'تحقق من مصدر السجل قبل اعتبار أي حادثة حركة شبكة حقيقية.</div>')
     elif not oc["live"] and not oc["replay"]:
         banner = '<div class="warnbox" style="margin-bottom:12px">لا توجد أي حوادث مسجلة بعد.</div>'
     else:
         banner = ""
     origin_bar = '<div style="margin-bottom:12px">%s</div>%s' % (sw, banner)
+    feed = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td>'
+                   '<td>%s</td><td>%s</td></tr>' %
+                   (e(ATTACK_AR.get(r.get("attack_type"), r.get("attack_type") or "—")),
+                    confidence_bar(r.get("confidence")),
+                    e(", ".join(r.get("mitre") or []) or "—"),
+                    e(r.get("src_ip")), e(r.get("tier")), outcome_pill(r["outcome"]))
+                   for r in (recent or []))
+    learning = learning or {}
+    daily = learning.get("daily_volume") or {}
+    baseline = learning.get("baseline_daily_mean")
+    today_count = daily.get(datetime.now(timezone.utc).date().isoformat())
+    traffic = ('<div class="card"><h2>الحركة مقابل خط الأساس</h2>'
+               '<p class="sub">أحداث السجلات المرصودة اليوم مقابل متوسط الأيام السابقة؛ ليست بايتات الشبكة.</p>'
+               '<div class="grid"><div class="kpi"><span>اليوم</span><b>%s</b></div>'
+               '<div class="kpi"><span>متوسط أيام الأساس السابقة</span><b>%s</b></div></div></div>' %
+               (e(today_count), e(baseline)))
+    links = sorted({(str(r.get("src_ip")), str(r.get("dst_ip")))
+                    for r in (recent or []) if r.get("src_ip") and r.get("dst_ip")})[:8]
+    network = ('<div class="card"><h2>خريطة المصادر والأهداف</h2>'
+               '<p class="sub">علاقات IP المسجلة في آخر الحوادث؛ لا استدلال جغرافي.</p><div class="chips">%s</div></div>' %
+               ("".join('<span class="chip"><code>%s → %s</code></span>' %
+                        (e(src), e(dst)) for src, dst in links) or e("لا علاقات مرصودة")))
     return (
         origin_bar +
-        '<div class="grid" hx-get="/ui/overview?origin=%s" hx-trigger="every 20s" hx-target="#view">%s</div>' % (ov["origin"], kpis) +
+        '<div class="grid">%s</div>' % kpis +
+        '<div class="card"><h2>الأحداث الأمنية الأخيرة</h2><p class="sub">آخر حوادث من سجل التدقيق؛ يتحدث عند وصول قرار جديد.</p>'
+        '<div class="tw"><table><thead><tr><th>الهجوم</th><th>الثقة</th><th>MITRE</th>'
+        '<th>المصدر</th><th>الفئة</th><th>الحالة</th></tr></thead><tbody>%s</tbody></table></div></div>' %
+        (feed or '<tr><td colspan="6">لا حوادث بعد.</td></tr>') + traffic + network +
         '<div class="card" style="margin-top:16px"><h2>القرارات عبر الزمن</h2>'
         '<p class="sub">عدد القرارات المسجلة في كل فترة</p>%s</div>' % _timeline(ov["timeline"]) +
         '<div class="cols"><div class="card"><h2>توزيع النتائج</h2>%s</div>'
@@ -270,7 +380,7 @@ def incidents(listing: dict, f: dict) -> str:
         '<input name="q" placeholder="بحث نصي" value="%s">'
         '<input name="min_score" placeholder="أقل درجة (0-1)" value="%s">'
         '<button class="btn btn-go">تصفية</button></form>'
-        % (_opts([("", "حي + replay"), ("live", "حي فقط"), ("replay", "replay فقط")], f.get("origin", "")),
+        % (_opts([("", "ملفات + replay"), ("live", "ملفات مراقبة"), ("replay", "replay فقط")], f.get("origin", "")),
            _opts([("", "كل النتائج")] + [(k, v) for k, v in OUTCOME_AR.items()], f.get("outcome", "")),
            _opts([("", "كل الفئات"), ("A", "A"), ("B", "B"), ("C", "C")], f.get("tier", "")),
            _opts([("", "كل الأنواع")] + [(k, v) for k, v in ATTACK_AR.items()], f.get("attack_type", "")),
@@ -282,16 +392,20 @@ def incidents(listing: dict, f: dict) -> str:
     for r in listing["rows"]:
         iid = e(r["incident_id"])
         who = ("%s ← %s" % (e(r["dst_ip"]), e(r["src_ip"]))) if r["src_ip"] else "—"
+        technique = ", ".join(r.get("mitre") or [])
+        attack_label = e(ATTACK_AR.get(r["attack_type"], r["attack_type"] or "—"))
+        if technique:
+            attack_label += "<br><code>" + e(technique) + "</code>"
         rows.append(
             '<tr><td>%s</td><td><a href="#" hx-get="/ui/incident/%s" hx-target="#drawer"><code>%s</code></a></td>'
             '<td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
             % (e(str(r["ts"])[:19]), iid, e(short(r["incident_id"], 16)), who,
-               e(ATTACK_AR.get(r["attack_type"], r["attack_type"] or "—")),
-               outcome_pill(r["outcome"]), score_bar(r["score"]), e(r["tier"]),
+               attack_label,
+               outcome_pill(r["outcome"]), confidence_bar(r["confidence"]), e(r["tier"]),
                label_pill(r["label"]), origin_pill(r.get("origin"))))
     table = (empty("لا توجد حوادث مطابقة.") if not rows else
              '<div class="tw"><table><thead><tr><th>الوقت</th><th>الحادثة</th><th>الهدف ← المصدر</th>'
-             '<th>النوع</th><th>النتيجة</th><th>الدرجة</th><th>الفئة</th><th>التصنيف</th><th>المصدر</th></tr></thead>'
+             '<th>النوع</th><th>النتيجة</th><th>الثقة</th><th>الفئة</th><th>التصنيف</th><th>المصدر</th></tr></thead>'
              '<tbody>%s</tbody></table></div>' % "".join(rows))
 
     def link(page, text):
@@ -319,7 +433,10 @@ def score_explanation(full: dict) -> str:
     if not inp:
         return ('<div class="card"><h2>لماذا هذه الدرجة؟ %s</h2>'
                 '<p class="note">لم تُسجَّل مدخلات الدرجة لهذه الحادثة (سُجّلت قبل هذا الإصدار).</p></div>' % origin)
-    conf = float(inp.get("confidence", 0))
+    if not isinstance(inp.get("confidence"), (int, float)):
+        return ('<div class="card"><h2>تفسير الدرجة</h2>'
+                '<p class="note">الثقة الأصلية غير مسجلة لهذه الحادثة.</p></div>')
+    conf = float(inp["confidence"])
     crit = str(inp.get("criticality", "low"))
     sev = int(inp.get("severity", 1))
     w = _WEIGHTS.get(crit, 0.45)
@@ -438,26 +555,39 @@ def approvals(pending: list, history: list, engine_attached: bool,
                 badge = ' ' + pill("down", "حرج") + (
                     ' ' + pill("healthy", "استلمها %s" % acked) if acked else "")
             ack_btn = ""
-            if crit and can_ack and not acked:
+            if can_ack and w and not acked:
                 ack_btn = (' <button class="btn" hx-post="/approvals/%s/ack" '
                            'hx-target="#approvals-result" hx-confirm="تأكيد الاستلام؟ سيتوقف التصرف التلقائي.">'
                            'استلمت الحالة</button>' % aid)
-            deadline_cell = ("%s<br><b>باقي %s</b>" % (e(p["deadline"]), e(_countdown(p["deadline"])))
-                             if crit else e(p["deadline"]))
+            deadline_cell = "%s<br><b>باقي %s</b>" % (e(p["deadline"]), e(_countdown(p["deadline"])))
+            technique = ", ".join(p.get("mitre") or [])
+            attack_label = e(ATTACK_AR.get(p.get("attack_type"), p.get("attack_type") or "—"))
+            if technique:
+                attack_label += "<br><code>" + e(technique) + "</code>"
+            modify_form = (
+                '<form hx-post="/approvals/%s/modify" hx-target="#approvals-result" '
+                'hx-confirm="تعديل الخطة واعتمادها؟">'
+                '<select name="action" aria-label="الإجراء البديل">'
+                '<option value="throttle_src">تقييد المصدر</option>'
+                '<option value="block_ip_temp">حظر مؤقت</option>'
+                '<option value="notify_only">إشعار فقط</option></select>'
+                '<input name="ttl_minutes" type="number" min="1" max="60" value="15" '
+                'aria-label="مدة الإجراء بالدقائق">'
+                '<button class="btn" type="submit">تعديل واعتماد</button></form>' % aid)
             rows.append(
                 '<tr><td><a href="#" hx-get="/ui/incident/%s" hx-target="#drawer"><code>%s</code></a>%s</td>'
                 '<td><code>%s ← %s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                 '<td><button class="btn btn-ok" hx-post="/approvals/%s/approve" hx-target="#approvals-result" '
                 'hx-confirm="اعتماد هذا القرار؟ سيُسجَّل في التدقيق.">اعتماد</button> '
                 '<button class="btn btn-no" hx-post="/approvals/%s/deny" hx-target="#approvals-result" '
-                'hx-confirm="رفض هذا القرار؟">رفض</button>%s</td></tr>'
+                'hx-confirm="رفض هذا القرار؟">رفض</button>%s%s</td></tr>'
                 % (aid, e(short(p["approval_id"], 16)), badge, e(p.get("dst_ip") or "—"), e(p.get("src_ip") or "—"),
-                   e(ATTACK_AR.get(p.get("attack_type"), p.get("attack_type") or "—")),
-                   score_bar(p["score"]), e(p["tier"]), deadline_cell, aid, aid, ack_btn))
+                   attack_label, confidence_bar(p["confidence"]), e(p["tier"]),
+                   deadline_cell, aid, aid, ack_btn, modify_form))
         body = ('<div class="tw"><table><thead><tr><th>الحادثة</th><th>الهدف ← المصدر</th><th>النوع</th>'
-                '<th>الدرجة</th><th>الفئة</th><th>الموعد النهائي</th><th>القرار</th></tr></thead><tbody>%s</tbody></table></div>'
+                '<th>الثقة</th><th>الفئة</th><th>الموعد النهائي</th><th>القرار</th></tr></thead><tbody>%s</tbody></table></div>'
                 '<div id="approvals-result" aria-live="polite"></div>'
-                '<p class="note">بعد 15 دقيقة بلا رد يتحول القرار تلقائيًا إلى إشعار فقط.</p>' % "".join(rows))
+                '<p class="note">بعد المهلة تُراجع خطة الاستجابة المضبوطة؛ التنفيذ الجاف بلا تأثير على الشبكة.</p>' % "".join(rows))
     hist = "".join(
         '<tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>'
         % (e(str(h["ts"])[:19]), e(short(h["incident_id"], 16)), outcome_pill(h["outcome"]), e(h["case_id"]))
@@ -507,7 +637,8 @@ def audit(rows: list, f: dict, chain: Optional[dict] = None) -> str:
     return ('<div class="card"><h2>سجل التدقيق</h2><p class="sub">كل قرار مسجل بشكل append-only.</p>%s'
             '<div class="tw"><table><thead><tr><th>#</th><th>الوقت</th><th>الحادثة</th><th>النتيجة</th><th>الدرجة</th>'
             '<th>القناة</th></tr></thead><tbody>%s</tbody></table></div>'
-            '<p class="note"><a href="/audit/export.csv">تصدير CSV</a></p></div>'
+            '<p class="note"><a href="/audit/export.csv">تصدير CSV</a> · '
+            '<a href="/audit/export.json">تصدير JSON</a></p></div>'
             '<div class="card"><h2>سلامة السجل</h2><p class="sub">يعيد حساب سلسلة SHA-256 ويكشف أي تعديل أو حذف أو إدخال خارجي.</p>%s</div>'
             % (form, body, verify))
 
@@ -523,7 +654,7 @@ def chain_report(rep: Optional[dict]) -> str:
             % (pill("down", "تم اكتشاف مشكلة"), "".join("<li>%s</li>" % e(p) for p in rep["problems"])))
 
 
-def settings(view: dict) -> str:
+def settings(view: dict, editable: bool = False, saved: bool = False) -> str:
     def kv(rows):
         return '<table><tbody>%s</tbody></table>' % "".join(
             '<tr><th>%s</th><td>%s</td></tr>' % (e(k), v) for k, v in rows)
@@ -533,20 +664,171 @@ def settings(view: dict) -> str:
                    for a in view["critical_assets"]) or "—"
     env_rows = [(name, pill("healthy" if ok else "degraded", "مضبوط" if ok else "غير مضبوط"))
                 for name, ok in view["env"]]
-    return (
+    dry = view.get("dry_run")
+    dry_text = "dry-run مفعّل" if dry is True else "تنفيذ فعلي" if dry is False else "حالة التشغيل غير متاحة"
+    policy = view.get("policy") or {}
+    summary = (
         '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">'
         '<div class="card"><h2>الاستقلالية والحدود</h2>%s</div>'
         '<div class="card"><h2>الموقع</h2>%s</div>'
         '<div class="card"><h2>القنوات والتكاملات</h2>%s<p class="note">القيم السرية لا تُعرض؛ فقط هل المتغير مضبوط.</p></div></div>'
-        '<p class="note">هذه الصفحة للقراءة فقط. التعديل يتم في ملف الإعدادات ثم إعادة التشغيل، حتى لا يصبح '
-        'التحكم عن بعد بالقواعد الأمنية ثغرة.</p>'
+        '<p class="note">تطبيق تغييرات الإعدادات يتطلب إعادة تشغيل Sentinel.</p>'
         % (kv([("المستوى الحالي", e(lv.get(view["autonomy_level"], view["autonomy_level"]))),
                ("حد الحظر / دقيقة", e(view["limits"]["max_blocks_per_min"])),
                ("حد الحظر / ساعة", e(view["limits"]["max_blocks_per_hour"])),
                ("مدة الحظر الافتراضية", e("%s دقيقة" % view["limits"]["default_ttl_min"])),
-               ("الأوضاع", pill("healthy", "dry-run مفروض (G2)"))]),
+               ("الوضع", pill("healthy" if dry else "degraded", dry_text)),
+               ("الثقة: تلقائي / موافقة / تقرير", e(" / ".join(str(policy.get(k, "—")) for k in
+                   ("auto_act_threshold", "human_approval_threshold", "report_threshold")))),
+               ("مهلة الموافقة / التقرير", e("%s / %s دقيقة" % (
+                   policy.get("approval_timeout_minutes", 15), policy.get("report_timeout_minutes", 30))))]),
            kv([("اسم الموقع", e(view["site"])), ("أصول حرجة (G1)", '<div class="chips">%s</div>' % crit),
+               ("عناوين محمية", e(", ".join(view.get("protected_ips") or []) or "—")),
                ("VLANs مراقبة", e(", ".join(view["monitored_vlans"]))),
                ("خطر التوجيه غير المتماثل", e(view["asymmetric_risk"]))]),
            kv(env_rows + [("Notifiers", e(", ".join(view["notifiers"]) or "—")),
                           ("SIEM", e(view["siem"]))])))
+    if not editable:
+        return summary + '<p class="note">ملف التهيئة غير مربوط بهذه الواجهة؛ لا يمكن حفظ التغييرات هنا.</p>'
+    defaults = {"auto_act_threshold": 0.95, "human_approval_threshold": 0.80,
+                "report_threshold": 0.50, "approval_timeout_minutes": 15,
+                "report_timeout_minutes": 30, "max_blocks_per_min": 5,
+                "max_blocks_per_hour": 20, "default_ttl_min": 30}
+    fields = "".join(
+        '<label>%s<input name="%s" type="%s" step="%s" value="%s" required></label>' %
+        (e(title), e(key), typ, step,
+         e((policy if key in policy else view["limits"]).get(key, defaults[key])))
+        for title, key, typ, step in (
+            ("عتبة التنفيذ الآلي", "auto_act_threshold", "number", "0.01"),
+            ("عتبة الموافقة", "human_approval_threshold", "number", "0.01"),
+            ("عتبة التقرير", "report_threshold", "number", "0.01"),
+            ("مهلة الموافقة بالدقائق", "approval_timeout_minutes", "number", "1"),
+            ("مهلة التقرير بالدقائق", "report_timeout_minutes", "number", "1"),
+            ("حد الحظر في الدقيقة", "max_blocks_per_min", "number", "1"),
+            ("حد الحظر في الساعة", "max_blocks_per_hour", "number", "1"),
+            ("مدة الحظر الافتراضية بالدقائق", "default_ttl_min", "number", "1")))
+    import json
+    form = ('<div class="card"><h2>تعديل الإعدادات</h2>'
+            '<form hx-post="/settings/save" hx-target="#view">'
+            '<div class="settings-grid">%s</div>'
+            '<label>العناوين المحمية، بفواصل<input name="protected_ips" value="%s"></label>'
+            '<label>قنوات التنبيه JSON، بأسماء متغيرات البيئة فقط'
+            '<textarea name="notifiers" rows="4">%s</textarea></label>'
+            '<button class="btn btn-go">احفظ بعد التحقق</button></form></div>' %
+            (fields, e(", ".join(view.get("protected_ips") or [])),
+             e(json.dumps(view.get("notifier_configs") or [], ensure_ascii=False))))
+    toggle = ('<div class="card"><h2>وضع التنفيذ</h2>'
+              '<p class="sub">الوضع الحالي يظهر في الأعلى. التغيير المحفوظ لا يسري حتى إعادة التشغيل.</p>'
+              '<form hx-post="/settings/dry-run" hx-target="#view" class="inline-form">'
+              '<input type="hidden" name="dry_run" value="on">'
+              '<button class="btn btn-ok">احفظ وضع المحاكاة</button></form>'
+              '<form hx-post="/settings/dry-run" hx-target="#view" class="inline-form" '
+              'hx-confirm="تأكيد إيقاف المحاكاة بعد إعادة التشغيل؟ قد تُنفذ إجراءات على الشبكة الحية.">'
+              '<input type="hidden" name="dry_run" value="off">'
+              '<button class="btn btn-no">إيقاف المحاكاة بعد إعادة التشغيل</button></form></div>')
+    notice = '<p class="warnbox">حُفظت الإعدادات. أعد تشغيل Sentinel لتطبيقها.</p>' if saved else ''
+    return notice + summary + form + toggle
+
+
+def learning(profile: dict) -> str:
+    total = profile["learning_days"] + profile["extend_days"]
+    done = profile["observed_days"]
+    features = profile.get("features") or {}
+    rows = "".join(
+        '<tr><th>%s</th><td>%s</td><td>%s</td></tr>' %
+        (e(name), e(len(values)), e(sum(values.values())))
+        for name, values in features.items())
+    forms = (
+        '<form hx-post="/learning/extend" hx-target="#view" class="inline-form">'
+        '<label>مدّ فترة التعلّم بالأيام <input name="days" type="number" min="1" max="365" value="1" required></label>'
+        '<button class="btn">مدّ الفترة</button></form>'
+        '<form hx-post="/learning/mode" hx-target="#view" class="inline-form" '
+        'hx-confirm="تغيير وضع التعلّم؟ قد يسمح وضع Active بتنفيذ إجراءات إذا أوقفت المحاكاة لاحقًا.">'
+        '<label>تغيير الوضع <select name="mode"><option value="auto">تلقائي</option>'
+        '<option value="learning">تعلّم</option><option value="active">Active</option></select></label>'
+        '<button class="btn btn-go">احفظ الوضع</button></form>')
+    return ('<div class="card"><h2>مرحلة التعلّم</h2><p class="sub">ملف أساس محفوظ وقابل للتصدير.</p>'
+            '<div class="grid"><div class="kpi"><span>الوضع الحالي</span><b>%s</b></div>'
+            '<div class="kpi"><span>أيام الرصد</span><b>%s / %s</b></div>'
+            '<div class="kpi"><span>موعد التحول</span><b class="small-value">%s</b></div></div>'
+            '<p class="note">بدأ: %s · تجاوز السعة: %s · سياسة التحول: %s</p>'
+            '<div class="bar wide"><i style="width:%.1f%%"></i></div>'
+            '<div class="tw"><table><thead><tr><th>خاصية الأساس</th><th>قيم مختلفة</th><th>رصد</th></tr></thead>'
+            '<tbody>%s</tbody></table></div>%s'
+            '<p><a href="/learning/export.json">تنزيل الأساس JSON</a></p></div>' %
+            (e(profile["mode"]), e(done), e(total), e(profile["active_at"]),
+             e(profile["started_at"]), e(profile["overflow"]), e(profile["override"]),
+             min(100, 100 * done / total), rows, forms))
+
+
+def intel(data: dict) -> str:
+    rows = "".join('<tr><td><code>%s</code></td><td>%s</td><td>%s</td></tr>' %
+                   (e(item.get("id")), e(item.get("name")),
+                    e(", ".join(item.get("tactics") or [])))
+                   for item in data["techniques"])
+    cves = "".join('<code class="chip">%s</code> ' % e(c) for c in data["cves"])
+    return ('<div class="card"><h2>MITRE ATT&amp;CK و CVE</h2>'
+            '<p class="sub">مطابقة محلية؛ التحديث يتم في الخلفية بواسطة الـ daemon.</p>'
+            '<div class="grid"><div class="kpi"><span>تقنيات محفوظة</span><b>%s</b></div>'
+            '<div class="kpi"><span>مدخلات CVE محفوظة</span><b>%s</b></div>'
+            '<div class="kpi"><span>آخر تحديث</span><b class="small-value">%s</b></div></div>'
+            '<p class="note">المصدر: %s</p>'
+            '<form class="filters" hx-get="/ui/intel" hx-target="#view">'
+            '<input name="q" value="%s" placeholder="ابحث بالمعرّف أو الاسم"><button class="btn">بحث</button></form>'
+            '<div class="tw"><table><thead><tr><th>المعرّف</th><th>التقنية</th><th>التكتيكات</th></tr></thead>'
+            '<tbody>%s</tbody></table></div>%s</div>' %
+            (e(data["technique_count"]), e(data["cve_count"]),
+             e(data["refreshed_at"]), e(data["source"] or "مطابقة محلية؛ الكتالوج لم يُزامَن"),
+             e(data["q"]), rows or '<tr><td colspan="3">لا نتائج محفوظة.</td></tr>',
+             '<p>نتائج CVE: %s</p>' % cves if cves else ''))
+
+
+def actions(rows: list, rollbacks: list, active: list, connected: bool) -> str:
+    current = "".join(
+        '<tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>'
+        '<form hx-post="/actions/rollback" hx-target="#view" '
+        'hx-confirm="إرجاع هذا الإجراء الآن؟">'
+        '<input type="hidden" name="action" value="%s">'
+        '<input type="hidden" name="target" value="%s">'
+        '<button class="btn btn-no">إرجاع</button></form></td></tr>' %
+        (e(a.get("action")), e(a.get("target")), e(a.get("expires")),
+         e(a.get("action")), e(a.get("target"))) for a in active)
+    history = "".join('<tr><td>%s</td><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>' %
+                      (e(r[1]), e(r[3]), e(r[4]), e(r[6]),
+                       "نعم" if r[7] else "لا") for r in rows)
+    rolled = "".join('<tr><td>%s</td><td>%s</td><td>%s</td></tr>' %
+                     (e(r[0]), e(r[1]), "نجح" if r[2] else "فشل") for r in rollbacks)
+    return ('<div class="card"><h2>إجراءات نشطة</h2>%s<div class="tw"><table><tbody>%s</tbody></table></div></div>'
+            '<div class="card"><h2>سجل الاستجابة</h2><div class="tw"><table><thead><tr>'
+            '<th>الوقت</th><th>الإجراء</th><th>المصدر</th><th>النتيجة</th><th>نُفذ</th></tr></thead>'
+            '<tbody>%s</tbody></table></div></div>'
+            '<div class="card"><h2>عمليات الرجوع</h2><div class="tw"><table><tbody>%s</tbody></table></div></div>' %
+            ('' if connected else '<p class="warnbox">المشغّل غير متصل؛ عرض السجل فقط.</p>',
+             current or '<tr><td>لا إجراءات نشطة.</td></tr>',
+             history or '<tr><td colspan="5">لا إجراءات مسجلة.</td></tr>',
+             rolled or '<tr><td>لا عمليات رجوع.</td></tr>'))
+
+
+def reports(report: Optional[dict]) -> str:
+    summary = ('<p class="note">آخر تقرير: %s · حوادث في التقرير: %s · إجراءات: %s</p>' %
+               (e(report["generated_at"]), e(len(report["incidents"])),
+                e(len(report["actions"])))) if report else empty("لم يُنشأ تقرير بعد.")
+    return ('<div class="card"><h2>التقارير</h2><p class="sub">لقطة من قاعدة التدقيق وحالة التشغيل وقت الطلب.</p>'
+            '<form hx-post="/reports/generate" hx-target="#view"><button class="btn btn-go">أنشئ تقريرًا الآن</button></form>'
+            '%s%s</div>' % (summary, '<p><a href="/reports/latest.json">تنزيل JSON</a></p>' if report else ''))
+
+
+def guide() -> str:
+    sections = (
+        ("1 · ما هو Sentinel؟", "سجلات Zeek وSuricata ← تعلّم 14 يومًا ← Active: كشف ومقارنة مع MITRE ← تسجيل أو موافقة أو إجراء محمي حسب الثقة."),
+        ("2 · التشغيل", "محليًا: python -m sentinel --config config.yaml run --capture-dir capture --ui. Docker: docker compose up --build -d. افتح /login وأدخل SENTINEL_OPS_UI_TOKEN."),
+        ("3 · ربط الشبكة", "ضع eve.json وconn.log وdns.log وssl.log وnotice.log في مجلد capture. على Linux اضبط CAPTURE_IFACE وCOMPOSE_PROFILES=capture بعد تجهيز SPAN/TAP. اضبط site.protected_ips في YAML."),
+        ("4 · تجربة آمنة", "أبقِ dry-run ظاهرًا. شغّل python -m sentinel.simulation scan --capture-dir capture ثم brute وddos وanomaly. الشذوذ يحتاج خط أساس مكتملًا؛ ليست هناك حزم مرسلة."),
+        ("5 · يوم المهندس", "راجع الحوادث وMITRE، ثم اعتمد أو ارفض أو عدّل الموافقات. راجع الإجراءات والرجوع، تحقق من التدقيق، وأنشئ تقريرًا."),
+        ("6 · قبل التشغيل الفعلي", "راجع 14 يومًا من البيانات، المصادر، قائمة الحماية، قنوات الإشعار، المهلات والرجوع. إيقاف المحاكاة يتطلب تأكيدًا وإعادة تشغيل؛ ابدأ بشبكة اختبار."),
+        ("7 · الأعطال الشائعة", "لا دخول: افحص الرمز والمنفذ. لا أحداث: افحص الملفات والمصادر. لا MITRE: افحص الكتالوج. لا شذوذ: أكمل الأساس. لا تنفيذ: راجع مرحلة التعلّم وL0 وdry-run."))
+    return ('<div class="card"><h2>ابدأ مع Sentinel</h2>'
+            '<p class="sub">دليل التشغيل الكامل والأوامر التفصيلية وحلول 10 مشكلات في GUIDE.md.</p>'
+            '<div class="cols">%s</div></div>' %
+            "".join('<section class="kpi"><h2>%s</h2><p>%s</p></section>' %
+                    (e(title), e(body)) for title, body in sections))

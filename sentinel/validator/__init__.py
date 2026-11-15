@@ -132,7 +132,8 @@ class Validator:
                 if liveness != "alive":
                     return ValidationVerdict.REJECTED   # stale_session_drift
             elif row.name == "critical_assets":
-                if action.target_ip in self._cfg.critical_assets:
+                if action.target_ip in (self._cfg.critical_assets |
+                                           self._cfg.protected_ips):
                     return ValidationVerdict.REJECTED   # critical_asset_allowlist_hit
             elif row.name == "rate_limit":
                 if breach:

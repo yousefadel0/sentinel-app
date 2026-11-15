@@ -135,6 +135,10 @@ class LiveEveDataSource(_LiveBase):
             conf = suricata_confidence(raw)
             if raw.get("event_type") == "dns" and isinstance(raw.get("dns"), dict):
                 signals = (*signals, *dns_signals(raw["dns"].get("rrname")))
+            if raw.get("event_type") == "alert":
+                from sentinel.threatintel.vulnerabilities import extract_cve_ids
+                signals = (*signals, *(f"cve:{cve}" for cve in
+                                       extract_cve_ids(raw.get("alert", {}))))
             alert = normalize(
                 raw, adapter=self.name,
                 ref=f"{self._path.name}#{first + i}",

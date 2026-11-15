@@ -61,10 +61,12 @@ def pending_queue(engine: Any) -> list[dict[str, Any]]:
             "outcome": dec.outcome.value,
             "tier": dec.tier,
             "score": float(dec.score),
+            "confidence": (getattr(dec, "inputs", None) or {}).get("confidence"),
             "deadline": dec.approval_deadline.isoformat()
             if dec.approval_deadline else None,
             "would": dec.would,
             "critical": bool((getattr(dec, "inputs", None) or {}).get("critical")),
+            "fallback_actions": (getattr(dec, "inputs", None) or {}).get("fallback_actions", []),
         })
     return out
 
@@ -126,11 +128,29 @@ def capture_health(capture_dir: Path | None) -> list[dict[str, Any]]:
             path.stat().st_mtime, tz=_dt.timezone.utc).isoformat()
         tracker.record_heartbeat(ts=hb_iso)
         snap = tracker.snapshot(source_type="file_replay")
-        snap.packet_drops = 0          # documented zero — file replay
+        snap.packet_drops = None       # file replay has no measured kernel counter
         snapshot = snap.to_dict()
         snapshot["file"] = path.name
         out.append(snapshot)
     return out
+
+
+def runtime_status(capture_dir: Path | None) -> dict[str, Any]:
+    """Read the daemon's atomic health snapshot without inferring a mode."""
+    if capture_dir is None:
+        return {"available": False}
+    path = Path(capture_dir) / "live-health.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        fresh = time.time() - path.stat().st_mtime <= LIVE_HEALTH_MAX_AGE_S
+    except (OSError, ValueError):
+        return {"available": False}
+    return {"available": True, "fresh": fresh,
+            "mode": doc.get("mode", "unknown"),
+            "learning": doc.get("learning") or {},
+            "enforcement": doc.get("enforcement") or {},
+            "notifications": doc.get("notifications") or {},
+            "sources": doc.get("sources") or []}
 
 
 def decision_row_bytes(store: Store, incident_id: str) -> dict[str, Any] | None:
@@ -409,7 +429,7 @@ def render_incident_detail(store: Store | None, incident_id: str) -> str:
             '<div class="source-grid">' + "".join(blocks) + "</div>" + note)
 
 
-def settings_view(cfg: dict) -> dict[str, Any]:
+def settings_view(cfg: dict, capture_dir: Path | None = None) -> dict[str, Any]:
     """Redacted effective config for the read-only settings page.
 
     Secrets never live in the config (only the NAMES of environment
@@ -436,6 +456,7 @@ def settings_view(cfg: dict) -> dict[str, Any]:
                  if (siem.get(p) or {}).get("enabled")]
         siem_txt = "مفعّل: " + ", ".join(parts) if parts else "مفعّل بلا اتجاهات"
     limits = cfg.get("limits") or {}
+    runtime = runtime_status(capture_dir)
     return {
         "autonomy_level": int(cfg.get("autonomy_level", 0) or 0),
         "limits": {"max_blocks_per_min": limits.get("max_blocks_per_min", "—"),
@@ -445,9 +466,14 @@ def settings_view(cfg: dict) -> dict[str, Any]:
         "critical_assets": [
             {"ip": a.get("ip", ""), "hostname": a.get("hostname", "")}
             for a in (cfg.get("site") or {}).get("critical_assets", [])],
+        "protected_ips": list((cfg.get("site") or {}).get("protected_ips", [])),
+        "policy": cfg.get("policy") or {},
+        "dry_run": (runtime.get("enforcement") or {}).get("dry_run")
+        if runtime.get("fresh") else None,
         "monitored_vlans": [str(x) for x in cfg.get("monitored_vlans", [])],
         "asymmetric_risk": (cfg.get("placement") or {}).get("asymmetric_risk", "—"),
         "env": [(n, bool(os.environ.get(n))) for n in env_names if n],
         "notifiers": [n.get("type", "?") for n in notifiers],
+        "notifier_configs": notifiers,
         "siem": siem_txt,
     }

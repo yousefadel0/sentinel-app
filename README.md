@@ -1,16 +1,37 @@
 # Sentinel
 
+For a step-by-step lab setup, browser login and safe simulations, see [GUIDE.md](GUIDE.md). The Ops UI starts in dry-run; open `http://127.0.0.1:8080/login` with `SENTINEL_OPS_UI_TOKEN`.
+
+## Linux pilot quick start
+
+1. Install Docker Engine and the Compose plugin; clone this repository.
+2. Copy `.env.example` to `.env`. Keep `config.container.yaml` in dry-run and
+   autonomy level 0 until the Linux pilot is reviewed. Add real admin,
+   gateway, DNS and critical-server addresses to `site.protected_ips`.
+3. Run `bash infra/run-linux.sh`. This builds and starts Sentinel with an
+   authenticated loopback Ops UI on port 8080. Read `docker compose logs sentinel`
+   for the generated UI token if `SENTINEL_OPS_UI_TOKEN` was left empty.
+4. For capture, set `CAPTURE_IFACE` and `COMPOSE_PROFILES=capture` in `.env`,
+   then rerun the script on a Linux host with a correctly configured SPAN/TAP NIC.
+
+Check `docker compose ps`, `/logs/live-health.json` inside the container,
+and `docker compose exec sentinel sentinel ctl audit verify /var/lib/sentinel/audit.sqlite`.
+Run `pytest tests/test_dry_run_attack_simulations.py` for five dry-run attack
+simulations. The learning profile at `/var/lib/sentinel/learning.json` switches
+to ACTIVE after 14 observed days; `sentinel ctl learning <path> status|mode|extend`
+provides operator control. To install at boot, copy `infra/sentinel.service`
+to `/etc/systemd/system/` after placing the repo at `/opt/sentinel-app`.
+
 Autonomous AI network defense software appliance — portable, self-contained,
 SPAN-based (never inline), wire-anchored (P3). See `Project.md` for the
 canonical master document (single source of truth).
 
 ## Status
 
-**ACTIVE MILESTONE: M0 — Scaffold & contracts**
+**Current state: Linux pilot package prepared; live enforcement requires site validation.**
 
-Repo layout, strict config loader + validator (full §8 schema), structured
-JSON logging, CLI with dry-run default true, and the two adapter ABCs
-(`DataSource`, `Actuator`). No detection/decision/actuation logic yet.
+The CLI, detectors, decision tiers, learning profile, audit chain, Ops UI and
+dry-run simulation are implemented. See `PROGRESS.md` for current verification.
 
 ## Install (dev)
 
@@ -77,8 +98,8 @@ but never executes an action regardless.
 ## Ops UI runbook (M7)
 
 The Ops UI is an **optional** module (`pip install '.[ops-ui]'`; already
-installed by `infra/bootstrap.sh`). There is no CLI wiring yet — standalone
-`serve()` with a hand-built store is the only launch path today.
+installed by `infra/bootstrap.sh`). Use `sentinel run --ui` to attach it to
+live approvals, or `sentinel ui` for observer mode.
 
 ### Launch (verified end-to-end at ef0b2b9)
 
@@ -187,10 +208,17 @@ pytest --cov=sentinel        # coverage (target ≥85% core; 100% on validator)
 
 ## Live shadow daemon (Phase 1)
 
+Current enforcement gate: the live daemon has no sensor-backed target-flow
+liveness checker wired in. It records liveness as unknown and fails closed at
+decision and execution time (including upstream webhook dispatch). Setting
+`--no-dry-run` and raising `autonomy_level` alone does not enable live action.
+An injected checker is available for isolated tests; a real checker still
+needs sensor evidence and deployment validation.
+
 `sentinel run` tails Suricata `eve.json` and Zeek `conn/dns/ssl/notice.log`
 as the sensors write them (restart- and rotation-safe offsets in
 `.sentinel-offsets.json`), correlates, decides, and records every decision
-(`case_id="live"`) in the audit store. It is SHADOW-ONLY: nothing executes.
+(`case_id="live"`) in the audit store. By default it is dry-run and cannot execute.
 Capture health (including `degraded` when a log goes quiet and Suricata
 kernel drops) is published to `<capture-dir>/live-health.json`.
 
@@ -198,8 +226,8 @@ kernel drops) is published to `<capture-dir>/live-health.json`.
 sentinel --config config.yaml run --capture-dir /var/log/suricata
 ```
 
-`docker compose up -d` (see `docker-compose.yml`) runs Suricata + Zeek +
-Sentinel against one SPAN interface (`CAPTURE_IFACE`).
+`docker compose up -d` starts Sentinel. Set `COMPOSE_PROFILES=capture` and
+`CAPTURE_IFACE` to add Suricata and Zeek against the SPAN interface.
 
 ## Behavioral detectors + evaluation (Phase 3)
 
@@ -272,8 +300,7 @@ actuator that talks to a production firewall is not something to ship.
 * **Metrics:** the daemon writes `<capture-dir>/sentinel.prom` in Prometheus
   text format (node_exporter textfile collector) — no listening port.
 * **Image:** `infra/Dockerfile` has a HEALTHCHECK on `live-health.json`
-  freshness. Built and smoke-tested on Python 3.11 (boot, tail, decision,
-  audit verify, health = healthy).
+  freshness. The current image has not been built on this Windows host.
 * **Throughput (detectors only, one core, synthetic flows):**
   `python -m sentinel.evaluation.perf 3000 100` → ~290 ms per 1-second
   cycle at 3,000 flows/s, so roughly 5-8k flows/s per process is the
@@ -346,9 +373,9 @@ the best case per family (confidence 1.0) is: DDoS on a high/critical asset
 -> human approval / auto-act; brute force and C2 -> at most 0.68 (high) or 0.80
 (critical); scan and DNS tunneling -> never above 0.60. G1 also judges the
 VICTIM (`dst`), so brute force on a critical server escalates to a human instead
-of blocking the attacker. Net: today only the DDoS playbook can lead to an
-executed action; the others are alert/escalate-only. This is a guardrail and
-scoring policy choice, so it is deliberately unchanged here.
+of blocking the attacker. The local nftables playbooks can execute only after
+all gates pass; the upstream SOAR dispatch is withheld without a verified
+rollback contract.
 
 ## Starting the Ops UI (recommended launcher)
 
@@ -362,3 +389,20 @@ used), unset token (a random one is generated and printed for that run), port
 already in use, port outside `ops_ui.allowed_ports`, audit store not found. It
 serves over the existing audit store in observer mode; use
 `sentinel run --ui` instead when the live daemon should be attached (approvals).
+
+## Known limitations / next steps
+
+- The updated Ops UI was exercised in headless Chrome on Windows with synthetic Zeek logs. See `UI_AUDIT.md` and `audit/after/` for the before/after evidence. The full Python test suite and `docker compose config --quiet` passed; a container build and Linux `up` remain unverified because the local Docker Desktop Linux Engine is unavailable.
+- Novel baseline anomalies have no ATT&CK technique ID unless additional evidence identifies a known technique; the UI shows the absence instead of inventing a mapping.
+- Settings saved from the UI take effect after a daemon restart. They are stored in `ui-settings.yaml` next to `audit.sqlite`, including when the base Docker config is read-only.
+
+- Linux capture and nftables enforcement have not been tested in the target
+  network. Configure real protected addresses and a sensor-backed flow
+  liveness checker before switching off dry-run.
+- The generic SOAR webhook is withheld from live execution until a specific
+  upstream API proves bounded TTL, rollback, and status read-back.
+- ATT&CK IDs are candidate classifications. CVE data is attached only when
+  a CVE ID occurs in observed alert evidence; NVD lookups refresh in the
+  background and remain optional when offline.
+- The append-only audit chain needs an externally stored head hash to detect
+  truncation. The container build and Linux run remain to be verified on Linux.

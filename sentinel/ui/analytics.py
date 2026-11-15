@@ -85,15 +85,22 @@ def incident_list(store: Store, *, outcome: str = "", tier: str = "",
     page = max(1, int(page))
     rows = store.query(
         "SELECT d.incident_id, d.ts, d.outcome, d.score, d.tier, d.would,"
-        " d.case_id, c.src_ip, c.dst_ip, c.attack_type, c.alert_count,"
+        " d.case_id, c.src_ip, c.dst_ip, c.attack_type, c.alert_count, c.mitre,"
+        " (SELECT inputs FROM incident_inputs i WHERE i.incident_id = d.incident_id"
+        " ORDER BY i.id DESC LIMIT 1),"
         " " + _LABEL + ", " + _ORIGIN_SQL + _JOIN + clause + " ORDER BY d.id DESC LIMIT ? OFFSET ?",
         tuple(params) + (PAGE_SIZE, (page - 1) * PAGE_SIZE))
     cols = ("incident_id", "ts", "outcome", "score", "tier", "would",
             "case_id", "src_ip", "dst_ip", "attack_type", "alert_count",
-            "label", "origin")
+            "mitre_raw", "inputs_raw", "label", "origin")
+    def project(row):
+        item = dict(zip(cols, row))
+        item["mitre"] = _json(item.pop("mitre_raw"), [])
+        item["confidence"] = _json(item.pop("inputs_raw"), {}).get("confidence")
+        return item
     return {"total": int(total), "page": page, "page_size": PAGE_SIZE,
             "pages": max(1, -(-int(total) // PAGE_SIZE)),
-            "rows": [dict(zip(cols, r)) for r in rows]}
+            "rows": [project(r) for r in rows]}
 
 
 def incident_full(store: Store, incident_id: str) -> Optional[dict[str, Any]]:
@@ -241,14 +248,15 @@ def overview(store: Store, buckets: int = 24,
     }
 
 
-def autonomy_readiness(ov: dict[str, Any], level: int) -> dict[str, Any]:
+def autonomy_readiness(ov: dict[str, Any], level: int,
+                       observed_days: int | None = None) -> dict[str, Any]:
     """Advisory view of the §6/§11 evidence gate. NEVER changes the level —
     upgrades stay a manual operator action (Project.md §6)."""
     checks = []
-    span = ov["span_days"]
+    span = observed_days
     checks.append(("14 يومًا على الأقل من البيانات",
                    span is not None and span >= 14,
-                   "لا توجد بيانات" if span is None else f"{span} يوم"))
+                   "لا يوجد ملف تعلّم" if span is None else f"{span} يوم رصد"))
     labeled = ov["judged"]
     checks.append(("عينات مصنّفة بشريًا (20 على الأقل)", labeled >= 20,
                    str(labeled)))

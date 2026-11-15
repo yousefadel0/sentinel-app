@@ -38,6 +38,9 @@ def config_view(**overrides) -> ConfigView:
         max_blocks_per_min=5,
         max_blocks_per_hour=20,
         autonomy_level=0,
+        auto_threshold=0.95,
+        human_threshold=0.70,
+        report_threshold=0.0,
     )
     base.update(overrides)
     return ConfigView(**base)
