@@ -32,6 +32,10 @@ sentinel = "sentinel.cli:main"
 [tool.setuptools.packages.find]
 include = ["sentinel*"]
 
+# Non-Python files the package needs at runtime (the Ops UI serves htmx).
+[tool.setuptools.package-data]
+sentinel = ["ui/static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
