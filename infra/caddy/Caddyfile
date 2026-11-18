@@ -1,0 +1,25 @@
+# HTTPS front door for the Sentinel Ops UI.
+# Sentinel itself stays on 127.0.0.1:8080 (hard invariant); only this proxy
+# listens on the network, and infra/firewall.sh limits WHO can reach it
+# (internal LAN + FortiGate VPN subnet).
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://{$SENTINEL_SITE:localhost}:443 {
+	# Certificate from Caddy's own local CA (no Internet, no public DNS).
+	# Install data/caddy/pki/authorities/local/root.crt on operator devices
+	# once to remove the browser warning.
+	tls internal
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8080
+}
+
+http://:80 {
+	redir https://{host}{uri} permanent
+}

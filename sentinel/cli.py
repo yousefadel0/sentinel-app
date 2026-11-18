@@ -94,6 +94,28 @@ def build_parser() -> argparse.ArgumentParser:
     ver.add_argument("--expect-head", metavar="HASH", default=None,
                      help="externally anchored chain head (detects truncation)")
 
+    usr = ctl_sub.add_parser("user", help="Ops UI accounts (accounts mode)")
+    usr.add_argument("--db", default=None, metavar="SQLITE",
+                     help="accounts database (default: from --config)")
+    usr_sub = usr.add_subparsers(dest="user_command", required=True)
+    u_add = usr_sub.add_parser("add", help="create a user (prompts for a password)")
+    u_add.add_argument("username")
+    u_add.add_argument("--role", required=True, choices=("viewer", "analyst", "admin"))
+    u_add.add_argument("--password-stdin", action="store_true",
+                       help="read the temporary password from stdin")
+    usr_sub.add_parser("list", help="list users")
+    for _name, _help in (("disable", "disable a user and end their sessions"),
+                         ("enable", "re-enable a user"),
+                         ("reset-mfa", "force MFA re-enrolment at next login")):
+        usr_sub.add_parser(_name, help=_help).add_argument("username")
+    u_role = usr_sub.add_parser("role", help="change a user's role")
+    u_role.add_argument("username")
+    u_role.add_argument("role", choices=("viewer", "analyst", "admin"))
+    u_pw = usr_sub.add_parser("reset-password",
+                              help="set a temporary password (must change at login)")
+    u_pw.add_argument("username")
+    u_pw.add_argument("--password-stdin", action="store_true")
+
     rb = ctl_sub.add_parser(
         "rollback", help="G3 one-command rollback of nftables enforcement")
     rb.add_argument("--all", action="store_true", required=True,
@@ -109,6 +131,77 @@ def build_parser() -> argparse.ArgumentParser:
                       help="local cache path (default: data/attack/enterprise-attack.json)")
 
     return parser
+
+
+def _read_password(from_stdin: bool) -> str:
+    if from_stdin:
+        return sys.stdin.readline().rstrip("\n")
+    import getpass
+    first = getpass.getpass("Temporary password (12+ chars): ")
+    if getpass.getpass("Repeat: ") != first:
+        raise ValueError("passwords do not match")
+    return first
+
+
+def _ctl_user(args) -> int:
+    """Account administration from the server shell (first admin, recovery)."""
+    import getpass
+    from pathlib import Path as _Path
+
+    from sentinel.ui.accounts import AccountError, AccountStore
+    db, audit_path = args.db, None
+    if args.config:
+        try:
+            cfg = load_config(args.config)
+        except ConfigError as exc:
+            print(f"invalid config: {exc}", file=sys.stderr)
+            return EXIT_FAIL
+        audit_path = (cfg.get("audit_store") or {}).get("path")
+        db = db or (cfg.get("ops_ui") or {}).get("accounts_db") or (
+            str(_Path(audit_path).parent / "accounts.sqlite") if audit_path else None)
+    if not db:
+        print("give --config (with audit_store.path) or --db", file=sys.stderr)
+        return EXIT_FAIL
+    accounts = AccountStore(db)
+    actor = "cli:" + (getpass.getuser() or "unknown")
+    try:
+        cmd, target = args.user_command, getattr(args, "username", "")
+        if cmd == "list":
+            for u in accounts.list():
+                print(f"{u.username:20} {u.role:8} mfa={'on' if u.mfa_enabled else 'off':3}"
+                      f" {'DISABLED' if u.disabled else 'active':8} last_login={u.last_login or '-'}")
+            return EXIT_OK
+        if cmd == "add":
+            accounts.create(target, args.role, _read_password(args.password_stdin))
+            print(f"OK: created {target} ({args.role}). First login: change the "
+                  "password and enrol the authenticator app.")
+        elif cmd == "role":
+            accounts.set_role(target, args.role)
+            print(f"OK: {target} is now {args.role}")
+        elif cmd in ("disable", "enable"):
+            accounts.set_disabled(target, cmd == "disable")
+            print(f"OK: {target} {cmd}d")
+        elif cmd == "reset-mfa":
+            accounts.reset_mfa(target)
+            print(f"OK: {target} will enrol MFA again at next login")
+        elif cmd == "reset-password":
+            accounts.reset_password(target, _read_password(args.password_stdin))
+            print(f"OK: temporary password set for {target}")
+    except (AccountError, ValueError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    finally:
+        accounts.close()
+    if audit_path and _Path(audit_path).is_file():
+        from sentinel.auditstore.store import Store
+        store = Store(audit_path)
+        try:
+            store.record_action(case_id="auth", action_type=f"user_{cmd.replace('-', '_')}",
+                                target_ip=None, ttl_minutes=None, verdict="ok",
+                                executed=False, detail=f"user={actor} target={target}")
+        finally:
+            store.close()
+    return EXIT_OK
 
 
 def _port_is_free(host: str, port: int) -> bool:
@@ -161,7 +254,7 @@ def _run_ui(args) -> int:
     cfg["ops_ui"] = ui_cfg
 
     env = ui_cfg["auth_token_env"]
-    if not os.environ.get(env):
+    if ui_cfg.get("auth_mode") != "accounts" and not os.environ.get(env):
         os.environ[env] = secrets.token_urlsafe(24)
         print(f"{env} was not set, so a random token was generated for "
               f"THIS run only:\n  {os.environ[env]}\n"
@@ -244,7 +337,7 @@ def _run_daemon(args) -> int:
     if args.ui:
         ui_cfg = cfg.get("ops_ui") or {}
         token_env = ui_cfg.get("auth_token_env", "SENTINEL_OPS_UI_TOKEN")
-        if not os.environ.get(token_env):
+        if ui_cfg.get("auth_mode") != "accounts" and not os.environ.get(token_env):
             os.environ[token_env] = secrets.token_urlsafe(24)
             print(f"{token_env} for this run: {os.environ[token_env]}",
                   file=sys.stderr)
@@ -339,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"learning profile error: {exc}", file=sys.stderr)
             return EXIT_FAIL
         return EXIT_OK
+
+    if args.command == "ctl" and args.ctl_command == "user":
+        return _ctl_user(args)
 
     if args.command == "ctl" and args.ctl_command == "rollback":
         from sentinel.actuators import NftablesLocalActuator

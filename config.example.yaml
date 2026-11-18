@@ -47,7 +47,10 @@ policy:
   report_threshold: 0.50
   approval_timeout_minutes: 15
   report_timeout_minutes: 30
-  report_fallback_actions: [throttle_src, block_ip_temp]
+  report_fallback_actions: [throttle_src]
+  min_risk_score: 0.20          # أقل من كده الحادثة تتسجّل بس
+  suppress_engine_events: true  # أحداث محرك Suricata (decoder/stream) ضوضاء
+  suppress_signature_ids: []    # أرقام قواعد Suricata المزعجة
 
 # الحالات الحرجة: تنبيه عاجل بمهلة، ثم تصرّف تلقائي إن لم يستجب أحد.
 # لا يتجاوز أي بوابة (المستوى 2 فأعلى، dry-run، المُحقِّق، مدة ≤ 60 دقيقة).

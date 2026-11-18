@@ -55,6 +55,9 @@ class AlertMeta:
     byte_count: int | None = None
     duration_seconds: float | None = None
     raw_payload_hash: str | None = None   # sha256 hex of raw evidence
+    # Human-readable "what the sensor said" (signature + rule id + category,
+    # Zeek note/service). Metadata only: never a payload byte.
+    label: str | None = None
 
 
 @dataclass(frozen=True)

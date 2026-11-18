@@ -203,6 +203,11 @@ def test_daemon_records_incident_context(tmp_path):
     d.run_once()
     ctx = store.rows("incident_context")[0]
     assert ctx["src_ip"] == "203.0.113.7" and ctx["dst_ip"] == "192.168.4.11"
-    assert json.loads(ctx["evidence"]) == ["eve.json#1"]
+    evidence = json.loads(ctx["evidence"])
+    alerts = [x for x in evidence if x["kind"] == "alert"]
+    assert [x["ref"] for x in alerts] == ["eve.json#1"]
+    assert alerts[0]["dport"] == 22 and alerts[0]["src"] == "203.0.113.7"
+    # the attacker's own records double as "who talked to whom" context
+    assert any(x["kind"] == "flow" for x in evidence)
     assert json.loads(ctx["mitre"]) == ["T1046"]
     store.close()

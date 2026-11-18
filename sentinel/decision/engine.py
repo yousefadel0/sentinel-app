@@ -63,6 +63,7 @@ class ConfigView:
     auto_threshold: float = 0.90     # unit-test default; configs pass policy
     human_threshold: float = 0.80
     report_threshold: float = 0.50
+    min_risk_score: float = 0.0      # risk floor; configs pass policy (0.20)
     approval_window_s: int = APPROVAL_WINDOW_S
     report_window_s: int = 1800
     critical_min_score: float = 2.0  # > 1.0 = no critical class (default off)
@@ -260,12 +261,19 @@ class DecisionEngine:
                     events.append(AuditEvent("dry_run_liveness_unverified",
                                              "recommendation only; no live-flow proof"))
                     continue
-                audit_name = (
-                    "stale_session_drift"
-                    if facts.liveness == "stale"
-                    else "liveness_unknown_treated_stale"  # Q4 verbatim split
-                )
-                override = "log_only"
+                if facts.liveness == "unknown":
+                    # No flow proof either way: never silence the incident.
+                    # A human still hears about it; only autonomous action
+                    # needs proof, so auto outcomes become an escalation and
+                    # the executor re-checks liveness before touching anything.
+                    audit_name = "liveness_unverified"
+                    detail = ("target not seen in recent flows; autonomous "
+                              "action needs a human")
+                    if outcome_now in (Outcome.AUTO_ACT, Outcome.AUTO_THROTTLE):
+                        override = "escalate_human"
+                else:
+                    audit_name = "stale_session_drift"
+                    override = "log_only"
             elif row.name == "critical_assets":
                 if dst_ip not in (self._cfg.critical_assets |
                                   self._cfg.protected_ips) or \
@@ -306,11 +314,17 @@ class DecisionEngine:
         """Playbook lookup + dry-run 'would do X because Y' phrase (P6)."""
         base_rec = recommend(attack_type)
         if outcome is Outcome.LOG_ONLY:
-            return None, (
-                f"would log only because confidence fell below the "
-                f"{self._cfg.human_threshold:.2f} band; "
-                f"playbook {base_rec.action} not proposed"
-            )
+            if cap == "below_risk_floor":
+                why = (f"risk score fell below the "
+                       f"{self._cfg.min_risk_score:.2f} floor")
+            elif cap:
+                why = f"the {cap} check downgraded it"
+            else:
+                floor = (self._cfg.report_threshold
+                         or self._cfg.human_threshold)
+                why = f"confidence fell below the {floor:.2f} band"
+            return None, (f"would log only because {why}; "
+                          f"playbook {base_rec.action} not proposed")
         if outcome is Outcome.NOTIFY_ONLY:
             reason = cap or "chain downgrade"
             rec = Recommendation(
@@ -360,6 +374,14 @@ class DecisionEngine:
         deltas, pre_events, fired_pre = self._run_pre_band(facts)
         score = apply_penalties(base, deltas)          # D1: clamp BEFORE banding
         banded = self._band(conf)
+        floor_event: AuditEvent | None = None
+        if banded != "log_only" and score < self._cfg.min_risk_score:
+            # Confidence says "probably real", risk says "does not matter":
+            # a low-severity hit on a low-value asset is logged, not escalated.
+            banded = "log_only"
+            floor_event = AuditEvent(
+                "below_risk_floor",
+                f"risk {score:.3f} < floor {self._cfg.min_risk_score:.2f}")
 
         outcome = {
             "auto": Outcome.AUTO_ACT,
@@ -396,7 +418,10 @@ class DecisionEngine:
         if chain_cap is not None:
             cap_applied = chain_cap
 
+        if floor_event is not None and cap_applied is None:
+            cap_applied = "below_risk_floor"
         events = (*pre_events,
+                  *([floor_event] if floor_event else []),
                   *([cap_event] if cap_event else []),
                   *post_events)
 

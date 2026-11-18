@@ -331,13 +331,12 @@ def test_same_inputs_same_decision_and_no_network_touch():
 
 
 def test_engine_never_invents_facts_default_is_unknown_liveness():
-    """Default Facts() has liveness=unknown -> safe log_only downgrade,
-    proving absence is treated as a fact pattern, not guessed alive."""
+    """Default Facts() has liveness=unknown -> never guessed alive: the auto
+    outcome is escalated to a human instead of acting."""
     eng, _ = engine()
     d = eng.evaluate(IncidentStub([alert("volume_spike", 1.0, crit="critical")]))
-    assert d.outcome is Outcome.LOG_ONLY
-    assert any(e.name == "liveness_unknown_treated_stale"
-               for e in d.audit_events)
+    assert d.outcome is Outcome.ESCALATE_HUMAN
+    assert any(e.name == "liveness_unverified" for e in d.audit_events)
 
 
 def test_dry_run_simulation_shows_tier_without_claiming_live_flow():

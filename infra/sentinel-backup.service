@@ -1,0 +1,10 @@
+[Unit]
+Description=Sentinel daily backup (audit store + accounts + learning, 14 kept)
+Requires=docker.service
+After=docker.service sentinel.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sentinel-app
+# SQLite online backup API: consistent copy while the daemon keeps writing.
+ExecStart=/usr/bin/docker compose exec -T sentinel python -c "import sqlite3,os,glob,datetime,shutil; d='/var/lib/sentinel'; b=d+'/backups'; os.makedirs(b,exist_ok=True); t=datetime.datetime.utcnow().strftime('%%Y%%m%%d'); [sqlite3.connect(os.path.join(d,n)).backup(sqlite3.connect(os.path.join(b,n.replace('.sqlite','-'+t+'.sqlite')))) for n in ('audit.sqlite','accounts.sqlite') if os.path.exists(os.path.join(d,n))]; os.path.exists(d+'/learning.json') and shutil.copy(d+'/learning.json', b+'/learning-'+t+'.json'); [os.remove(p) for pat in ('audit-*','accounts-*','learning-*') for p in sorted(glob.glob(os.path.join(b,pat)))[:-14]]"

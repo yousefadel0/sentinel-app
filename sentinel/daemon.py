@@ -108,7 +108,7 @@ class AdvisoryTriage:
 
 #: Outcomes worth a second opinion (the "ambiguous ~10%" of Project.md §5).
 AMBIGUOUS_OUTCOMES = frozenset({"human_approval", "escalate_human",
-                                "notify_only"})
+                                "notify_only", "report_wait"})
 
 
 class LockedEngine:
@@ -162,6 +162,9 @@ class Daemon:
         self._intel = intel
         self._cve_intel = cve_intel
         self._liveness_check = liveness_check
+        bind = getattr(liveness_check, "bind_clock", None)
+        if bind is not None:
+            bind(lambda: self._clock())
         self._executor = executor
         self._metrics_path = Path(metrics_path) if metrics_path else None
         self._hub, self._exporter = hub, exporter
@@ -183,6 +186,8 @@ class Daemon:
         self._decided: dict[tuple[str, str, str], tuple[frozenset, int]] = {}
         self.cycles = 0
         self.decisions = 0
+        self.summary_hour_utc: int | None = None   # daily summary (notifiers)
+        self._last_summary_day: str | None = None
 
     # -- one cycle ------------------------------------------------------ #
 
@@ -198,6 +203,9 @@ class Daemon:
             except Exception as exc:     # P4: a bad source never stops the loop
                 log.warning("source_fetch_failed",
                             source=getattr(src, "name", "?"), error=str(exc))
+        observe = getattr(self._liveness_check, "observe", None)
+        if observe is not None:
+            observe(fresh)
         anomalies = self._learning.anomalies(fresh) if self._learning is not None else []
         if self._learning is not None:
             self._learning.observe(fresh)
@@ -219,6 +227,7 @@ class Daemon:
             self._decided[key] = (sigs, n)
             made += 1
         self._apply_resolutions()
+        self._maybe_daily_summary()
         if self._watch is not None:
             self._watch.tick()
         if self._executor is not None:
@@ -337,8 +346,26 @@ class Daemon:
             signals=list(incident.signals),
             alert_count=len(incident.alerts),
             first_ts=incident.first_ts, last_ts=incident.last_ts,
-            evidence=[a.source.ref for a in incident.alerts[:50]],
+            evidence=self._evidence(incident),
             mitre=list(mapping.technique_ids) if mapping else [])
+
+    def _evidence(self, incident) -> list[dict]:
+        """What the sensors saw (metadata only) + the attacker's recent
+        conversations, so an analyst can answer what/how/where/who."""
+        rows: list[dict] = []
+        for a in sorted(incident.alerts, key=lambda x: x.ts)[:50]:
+            rows.append({
+                "kind": "alert", "ts": a.ts, "source": a.source.adapter,
+                "ref": a.source.ref, "src": a.src_ip, "sport": a.src_port,
+                "dst": a.dst_ip, "dport": a.dst_port, "proto": a.protocol,
+                "what": a.meta.label or ", ".join(a.signals),
+                "bytes": a.meta.byte_count})
+        recent = getattr(self._liveness_check, "recent_flows", None)
+        if recent is not None and incident.src_ip:
+            for f in recent(incident.src_ip, 30):
+                rows.append({**f, "kind": "flow",
+                             "ts": datetime.fromtimestamp(f["ts"], timezone.utc).isoformat()})
+        return rows
 
     def _record(self, decision, case_id: str) -> None:
         rec = decision.recommendation
@@ -360,16 +387,18 @@ class Daemon:
         the same seam, validator chain, window and audit trail as the UI."""
         while True:
             try:
-                approval_id, approved = self._resolutions.get_nowait()
+                req = self._resolutions.get_nowait()
             except queue.Empty:
                 return
+            approval_id, approved = req[0], req[1]
+            actor = req[2] if len(req) > 2 else "telegram_engineer"
             if approved is None:         # /ack: engineer is handling it
                 if self._watch is not None:
-                    self._watch.ack(approval_id, "telegram")
+                    self._watch.ack(approval_id, actor)
                 continue
             try:
                 decision = self._engine.resolve(approval_id, approved,
-                                                actor="telegram_engineer")
+                                                actor=actor)
             except KeyError:
                 continue                 # stale/unknown id: nothing to do
             if self._watch is not None:
@@ -377,7 +406,38 @@ class Daemon:
             self._record(decision, "telegram")
             self._enforce_approved(decision, "telegram")
             log.info("chat_approval_resolved", approval_id=approval_id,
-                     approved=approved)
+                     approved=approved, actor=actor)
+
+    def _maybe_daily_summary(self) -> bool:
+        """Once a day at ``summary_hour_utc``: what happened in 24 h, by attacker."""
+        if self._hub is None or self.summary_hour_utc is None:
+            return False
+        now = self._clock()
+        day = now.strftime("%Y-%m-%d")
+        if now.hour < self.summary_hour_utc or self._last_summary_day == day:
+            return False
+        self._last_summary_day = day
+        try:
+            from sentinel.ui.analytics import inbox
+            data = inbox(self._store, hours=24, now=now)
+        except Exception as exc:                  # never break the loop
+            log.warning("daily_summary_failed", error=type(exc).__name__)
+            return False
+        from sentinel.notify.hub import Notification
+        pending = len(self._engine.pending_approvals())
+        lines = [f"آخر 24 ساعة حتى {now.strftime('%Y-%m-%d %H:%M')} UTC",
+                 f"مصادر هجوم: {len(data['attackers'])} · حوادث مهمة: {data['important_incidents']}"
+                 f" · ضوضاء مسجّلة فقط: {data['noise_total']}",
+                 f"موافقات مفتوحة الآن: {pending}"]
+        for g in data["attackers"][:5]:
+            lines.append(f"• {g['src_ip']} → {', '.join(g['targets'][:2])}: "
+                         f"{', '.join(g['types']) or '—'} (خطورة {g['max_score']:.0%})")
+        if not data["attackers"]:
+            lines.append("لا هجمات تستحق الانتباه. ✔")
+        self._hub.notify_urgent(Notification(
+            title="الملخص اليومي", body="\n".join(lines), severity="info",
+            incident_id=f"summary-{day}", outcome="summary"))
+        return True
 
     def _export(self) -> None:
         if self._exporter is None:
@@ -526,6 +586,15 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
     from sentinel.threatintel.vulnerabilities import CveIntel
     cve_intel = CveIntel(cve_path) if cve_path is not None else None
     state = OffsetStore(state_path or capture_dir / ".sentinel-offsets.json")
+    policy = cfg.get("policy") or {}
+    from sentinel.capture.normalizer import configure_noise
+    configure_noise(
+        suppress_signature_ids=policy.get("suppress_signature_ids", ()),
+        suppress_engine_events=policy.get("suppress_engine_events", True))
+    if liveness_check is None:
+        # Real proof from the sensors' own flow records (never invented).
+        from sentinel.capture.liveness import FlowLiveness
+        liveness_check = FlowLiveness()
     sources: list[DataSource] = []
     hints = asset_hints(cfg)
     eve = capture_dir / "eve.json"
@@ -585,6 +654,10 @@ def build_daemon(cfg: dict, capture_dir: Path, store: Store, *,
         clock=_utcnow, record_decision=daemon._record,
         auto_remediate=bool(cr.get("auto_remediate_on_timeout", True)),
         reminder_s=int(cr.get("reminder_minutes", 5)) * 60)
+    for item in cfg.get("notifiers") or []:
+        if item.get("daily_summary_hour_utc") is not None:
+            daemon.summary_hour_utc = int(item["daily_summary_hour_utc"])
+            break
     _restore_pending(store, engine, daemon._watch)
     return daemon
 
@@ -639,7 +712,9 @@ def _build_notifiers(cfg: dict):
         else:
             senders.append(TelegramSender(item["url_env"], item["chat_id"]))
             if item.get("approvals") and approvals is None:
-                approvals = TelegramApprovals(item["url_env"], item["chat_id"])
+                approvals = TelegramApprovals(
+                    item["url_env"], item["chat_id"],
+                    allowed_user_ids=item.get("allowed_user_ids"))
     return (NotifierHub(senders) if senders else None), approvals
 
 

@@ -13,6 +13,9 @@ services:
     command: ["-i", "${CAPTURE_IFACE:-eth1}"]
     volumes:
       - sensor-logs:/var/log/suricata
+      # Rules survive container re-creation; refreshed daily by
+      # infra/sentinel-rules-update.timer (suricata-update).
+      - suricata-rules:/var/lib/suricata
     restart: unless-stopped
 
   zeek:
@@ -24,6 +27,19 @@ services:
     command: ["zeek", "-i", "${CAPTURE_IFACE:-eth1}", "local", "LogAscii::use_json=F"]
     volumes:
       - sensor-logs:/logs
+    restart: unless-stopped
+
+  proxy:
+    # HTTPS for the Ops UI on the LAN/VPN (profile "web"). Sentinel stays on
+    # loopback; see infra/caddy/Caddyfile and infra/firewall.sh.
+    profiles: [web]
+    image: caddy:2.8.4
+    network_mode: host
+    environment:
+      SENTINEL_SITE: ${SENTINEL_SITE:-localhost}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
     restart: unless-stopped
 
   sentinel:
@@ -48,3 +64,5 @@ services:
 volumes:
   sensor-logs:
   sentinel-data:
+  suricata-rules:
+  caddy-data:

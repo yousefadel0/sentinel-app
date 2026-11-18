@@ -24,22 +24,29 @@ with the same record_decision call shape. No other write exists.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, RedirectResponse,
+                               Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from sentinel.auditstore.store import Store
 from sentinel.logging_setup import get_logger
-from sentinel.ui.auth import TokenAuth
+from sentinel.ui.accounts import AccountStore, role_at_least
+from sentinel.ui.auth import TOKEN_HEADER, TokenAuth
 from sentinel.ui import analytics, pages, views
 
 log = get_logger("sentinel.ui")
+
+#: Session cookie (accounts mode): HttpOnly, SameSite=Strict, Secure on HTTPS.
+SESSION_COOKIE = "sentinel_session"
 
 #: DP2 auditability: the ONLY unauthenticated route serves exactly this
 #: vendored asset (pure htmx library file, zero operational data).
@@ -101,7 +108,17 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             "ops_ui.enabled is false; refusing to start the Ops UI "
             "(never on by default — explicit operator opt-in required)")
     port = validate_bind(ui_cfg["bind"], ui_cfg.get("allowed_ports"))
-    auth = TokenAuth(ui_cfg["auth_token_env"])
+    accounts: AccountStore | None = None
+    auth: TokenAuth | None = None
+    if ui_cfg.get("auth_mode", "token") == "accounts":
+        db = ui_cfg.get("accounts_db") or str(
+            Path((cfg.get("audit_store") or {}).get("path", "data/audit.sqlite"))
+            .parent / "accounts.sqlite")
+        accounts = AccountStore(db)
+        if ui_cfg.get("allow_token_api") and os.environ.get(ui_cfg["auth_token_env"]):
+            auth = TokenAuth(ui_cfg["auth_token_env"])
+    else:
+        auth = TokenAuth(ui_cfg["auth_token_env"])
 
     app = FastAPI(title="Sentinel Ops UI", docs_url=None, redoc_url=None,
                   openapi_url=None)
@@ -115,31 +132,109 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     app.state.critical_status = critical_status
     app.state.executor = executor
     app.state.config_path = Path(config_path) if config_path else None
+    app.state.accounts = accounts
+
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        response = await call_next(request)
+        h = response.headers
+        h.setdefault("X-Frame-Options", "DENY")
+        h.setdefault("X-Content-Type-Options", "nosniff")
+        h.setdefault("Referrer-Policy", "no-referrer")
+        h.setdefault("Content-Security-Policy",
+                     "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                     "frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
+        if not request.url.path.startswith("/static/"):
+            h.setdefault("Cache-Control", "no-store")
+        return response
 
     static_dir = Path(__file__).parent / "static"
     # DP2: mount ONLY the vendored file directory; every file in it must
     # appear in STATIC_EXCEPTION_FILES to keep the exception auditable.
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    def _guard(request: Request) -> None:
-        auth.check(request)
+    def _client_ip(request: Request) -> str:
+        peer = request.client.host if request.client else ""
+        # Only the local reverse proxy (Caddy on the same host) is trusted
+        # to report the real client address.
+        if peer in ("127.0.0.1", "::1"):
+            fwd = request.headers.get("x-forwarded-for", "")
+            if fwd:
+                return fwd.split(",")[0].strip()[:64]
+        return peer[:64]
 
-    def _record_ui_change(action: str, detail: str) -> None:
+    def _guard(request: Request, need: str = "viewer") -> str:
+        """Authenticate + authorise; returns the acting user's name."""
+        if accounts is None:
+            auth.check(request)                       # legacy token mode
+            request.state.actor = "ops_ui_authenticated"
+            return request.state.actor
+        if auth is not None and request.headers.get(TOKEN_HEADER):
+            auth.check(request)                       # opt-in automation token
+            request.state.actor = "api_token"
+            return request.state.actor
+        sess = accounts.session(request.cookies.get(SESSION_COOKIE))
+        if sess is None or sess.stage != "full":
+            raise HTTPException(status_code=401, detail="unauthorized")
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            sent = request.headers.get("x-csrf-token", "")
+            if not sent or not hmac.compare_digest(sent, sess.csrf):
+                raise HTTPException(status_code=403, detail="csrf check failed")
+        if not role_at_least(sess.role, need):
+            raise HTTPException(status_code=403,
+                                detail=f"this action needs the {need} role")
+        request.state.actor = sess.username
+        request.state.session = sess
+        return sess.username
+
+    def _actor(request: Request) -> str:
+        return getattr(request.state, "actor", "ops_ui")
+
+    def _audit_auth(event: str, user: str, request: Request, ok: bool,
+                    detail: str = "") -> None:
+        """Who logged in / out / failed: chained into the audit store."""
         if app.state.store is not None:
+            app.state.store.record_action(
+                case_id="auth", action_type=event, target_ip=_client_ip(request),
+                ttl_minutes=None, verdict="ok" if ok else "refused",
+                executed=False, detail=f"user={user} {detail}".strip()[:500])
+        log.info("auth_event", auth_event=event, user=user, ok=ok)
+
+    def _record_ui_change(action: str, detail: str, request: Request | None = None) -> None:
+        if app.state.store is not None:
+            by = _actor(request) if request is not None else "ops_ui"
             app.state.store.record_action(case_id="ops_ui", action_type=action,
                                           target_ip=None, ttl_minutes=None,
                                           verdict="saved", executed=False,
-                                          detail=detail)
+                                          detail=f"{detail} by={by}")
 
     # -- dashboard shell ------------------------------------------------ #
     @app.get("/login", response_class=HTMLResponse)
     def login() -> HTMLResponse:
+        if accounts is not None:
+            return HTMLResponse(pages.login_accounts(
+                first_run=accounts.count() == 0))
         return HTMLResponse(pages.login(), headers={"Cache-Control": "no-store"})
 
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request) -> HTMLResponse:
+    def index(request: Request) -> Response:
+        if accounts is not None:
+            try:
+                _guard(request)
+            except HTTPException:
+                return RedirectResponse("/login", status_code=303)
+            sess = request.state.session
+            return HTMLResponse(pages.shell(user={
+                "name": sess.username, "role": sess.role, "csrf": sess.csrf}))
         _guard(request)
         return HTMLResponse(pages.shell())
+
+    if accounts is not None:
+        from sentinel.ui import account_routes
+        account_routes.install(app, accounts=accounts, guard=_guard,
+                               audit_auth=_audit_auth, client_ip=_client_ip,
+                               cookie=SESSION_COOKIE)
 
     # Human-readable fragments are separate from the stable JSON API below.
     @app.get("/dashboard/health", response_class=HTMLResponse)
@@ -198,14 +293,14 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                             request: Request, *, action_override: str | None = None,
                             ttl_minutes: int | None = None) -> Response:
         """THE approval write path — same seam as CLI (Engine.resolve)."""
-        _guard(request)
+        _guard(request, "analyst")
         if app.state.engine is None or app.state.store is None:
             raise HTTPException(status_code=409, detail=(
                 "no engine/store attached; approvals unavailable in "
                 "standalone observer mode"))
         try:
             decision = app.state.engine.resolve(approval_id, approved,
-                                                actor="ops_ui_authenticated",
+                                                actor=_actor(request),
                                                 action_override=action_override,
                                                 ttl_minutes=ttl_minutes)
         except KeyError as exc:
@@ -228,7 +323,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
                           for e in decision.audit_events],  # P6 complete path
         )
         log.info("approval_resolved", approval_id=approval_id,
-                 approved=approved)
+                 approved=approved, actor=_actor(request))
         if app.state.on_resolved is not None:
             try:
                 app.state.on_resolved(decision)      # executor (same seam)
@@ -398,6 +493,47 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             origin=origin, page=page)
         return _page(pages.incidents(listing, f))
 
+    @app.get("/ui/ai", response_class=HTMLResponse)
+    def ui_ai(request: Request) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        brain = cfg.get("brain") or {}
+        env = brain.get("llm_endpoint_env", "SENTINEL_LLM_API")
+        status = {"configured": bool(os.environ.get(env)), "env": env,
+                  "model": brain.get("model"), "hard_cutoff_s": brain.get("hard_cutoff_s"),
+                  "max_per_min": 6}
+        return _page(pages.ai_page(analytics.ai_overview(store), status))
+
+    @app.get("/ui/inbox", response_class=HTMLResponse)
+    def ui_inbox(request: Request, hours: int = 24) -> HTMLResponse:
+        _guard(request)
+        store = _store_or_note()
+        if store is None:
+            return _page(pages.empty("لا يوجد سجل تدقيق مربوط بالواجهة."))
+        pending = views.pending_queue(app.state.engine)
+        for p in pending:
+            row = store.query(
+                "SELECT src_ip, dst_ip, attack_type FROM incident_context"
+                " WHERE incident_id = ? ORDER BY id DESC LIMIT 1", (p["approval_id"],))
+            if row:
+                p["src_ip"], p["dst_ip"], p["attack_type"] = row[0]
+        sess = getattr(request.state, "session", None)
+        return _page(pages.inbox(analytics.inbox(store, hours=max(1, min(int(hours), 168))),
+                                 pending, role=sess.role if sess else "admin"))
+
+    @app.get("/incidents/{incident_id}/report", response_class=HTMLResponse)
+    def incident_report(incident_id: str, request: Request) -> HTMLResponse:
+        actor = _guard(request)
+        store = _need_store()
+        full = analytics.incident_full(store, incident_id)
+        if full is None:
+            raise HTTPException(status_code=404, detail="unknown incident")
+        _record_ui_change("incident_report_viewed", incident_id, request)
+        return HTMLResponse(pages.incident_report(full, generated_by=actor,
+                                                  chain=store.verify_chain()))
+
     @app.get("/ui/incident/{incident_id}", response_class=HTMLResponse)
     def ui_incident(incident_id: str, request: Request) -> HTMLResponse:
         _guard(request)
@@ -413,7 +549,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     async def annotate(incident_id: str, request: Request) -> HTMLResponse:
         """Analyst verdict/note — appended to the audit store ONLY. It never
         reaches the engine, so it cannot change or trigger any action."""
-        _guard(request)
+        _guard(request, "analyst")
         store = _store_or_note()
         if store is None:
             raise HTTPException(status_code=409, detail="no store attached")
@@ -426,7 +562,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             raise HTTPException(status_code=422, detail="invalid label")
         if not label and not note:
             raise HTTPException(status_code=422, detail="empty annotation")
-        store.record_analyst_note(incident_id=incident_id, actor="ops_ui",
+        store.record_analyst_note(incident_id=incident_id, actor=(_actor(request) if accounts is not None else "ops_ui"),
                                   label=label, note=note)
         log.info("analyst_annotation", incident_id=incident_id, label=label)
         return _page(pages.incident_detail(
@@ -436,12 +572,16 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
     def ack_critical(approval_id: str, request: Request) -> HTMLResponse:
         """'I am handling it': stops the automatic deadline action for a
         critical case. Recorded by the escalation watch; changes no decision."""
-        _guard(request)
+        _guard(request, "analyst")
         if app.state.on_ack is None:
             raise HTTPException(status_code=409, detail=(
                 "no escalation watch attached (run the live daemon with "
                 "critical_response enabled)"))
-        if not app.state.on_ack(approval_id):
+        try:
+            acked = app.state.on_ack(approval_id, _actor(request))
+        except TypeError:                     # single-argument callbacks
+            acked = app.state.on_ack(approval_id)
+        if not acked:
             raise HTTPException(status_code=404, detail=(
                 "no open critical case with that id, or already acknowledged"))
         log.info("critical_ack", approval_id=approval_id)
@@ -527,7 +667,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
 
     @app.post("/settings/save", response_class=HTMLResponse)
     async def save_settings(request: Request) -> HTMLResponse:
-        _guard(request)
+        _guard(request, "admin")
         path = app.state.config_path
         if path is None:
             raise HTTPException(status_code=409, detail="configuration file not attached")
@@ -556,13 +696,13 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         except (KeyError, ValueError, ConfigError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=422, detail=f"invalid settings: {exc}") from None
         _write_ui_settings(updated)
-        _record_ui_change("settings_saved", "restart_required")
+        _record_ui_change("settings_saved", "restart_required", request)
         return _page(pages.settings(views.settings_view(updated, app.state.capture_dir),
                                     editable=True, saved=True))
 
     @app.post("/settings/dry-run", response_class=HTMLResponse)
     async def save_dry_run(request: Request) -> HTMLResponse:
-        _guard(request)
+        _guard(request, "admin")
         path = app.state.config_path
         if path is None:
             raise HTTPException(status_code=409, detail="configuration file not attached")
@@ -583,7 +723,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         updated["enforcement_dry_run"] = value == "on"
         validate_config(updated)
         _write_ui_settings(updated)
-        _record_ui_change("dry_run_config_saved", value)
+        _record_ui_change("dry_run_config_saved", value, request)
         return _page(pages.settings(views.settings_view(updated, app.state.capture_dir),
                                     editable=True, saved=True))
 
@@ -614,19 +754,19 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
 
     @app.post("/learning/mode", response_class=HTMLResponse)
     async def learning_mode(request: Request) -> HTMLResponse:
-        _guard(request)
+        _guard(request, "admin")
         form = parse_qs((await request.body())[:1024].decode("utf-8", "replace"))
         value = (form.get("mode") or [""])[0]
         if value not in ("auto", "learning", "active"):
             raise HTTPException(status_code=422, detail="invalid learning mode")
         profile = _learning()
         profile.set_override(value)
-        _record_ui_change("learning_mode_override", value)
+        _record_ui_change("learning_mode_override", value, request)
         return _page(pages.learning(profile.export()))
 
     @app.post("/learning/extend", response_class=HTMLResponse)
     async def learning_extend(request: Request) -> HTMLResponse:
-        _guard(request)
+        _guard(request, "admin")
         form = parse_qs((await request.body())[:1024].decode("utf-8", "replace"))
         try:
             days = int((form.get("days") or [""])[0])
@@ -634,7 +774,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
             profile.extend(days)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
-        _record_ui_change("learning_extend_days", str(days))
+        _record_ui_change("learning_extend_days", str(days), request)
         return _page(pages.learning(profile.export()))
 
     def _intel_data(q: str = "") -> dict:
@@ -670,7 +810,8 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
         _guard(request)
         store = _need_store()
         actions = store.query("SELECT id, ts, case_id, action_type, target_ip, ttl_minutes,"
-                              " verdict, executed, detail FROM actions ORDER BY id DESC LIMIT 100")
+                              " verdict, executed, detail FROM actions WHERE case_id != 'auth'"
+                              " ORDER BY id DESC LIMIT 100")
         rollbacks = store.query("SELECT ts, case_id, ok, detail FROM rollbacks"
                                 " ORDER BY id DESC LIMIT 30")
         active = app.state.executor.active() if app.state.executor else []
@@ -679,7 +820,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
 
     @app.post("/actions/rollback", response_class=HTMLResponse)
     async def ui_rollback(request: Request) -> HTMLResponse:
-        _guard(request)
+        _guard(request, "analyst")
         if app.state.executor is None:
             raise HTTPException(status_code=409, detail="no executor attached")
         form = parse_qs((await request.body())[:2048].decode("utf-8", "replace"))
@@ -715,7 +856,7 @@ def create_app(cfg: dict, engine=None, store: Store | None = None,
 
     @app.post("/reports/generate", response_class=HTMLResponse)
     def generate_report(request: Request) -> HTMLResponse:
-        _guard(request)
+        _guard(request, "analyst")
         report = _report()
         path = app.state.report_dir / "latest.json"
         path.parent.mkdir(parents=True, exist_ok=True)

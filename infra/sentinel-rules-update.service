@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Suricata rules for Sentinel (ET Open)
+Requires=docker.service
+After=docker.service sentinel.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sentinel-app
+ExecStart=/usr/bin/docker compose exec -T suricata suricata-update --no-test
+ExecStartPost=/usr/bin/docker compose restart suricata

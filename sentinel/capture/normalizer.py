@@ -59,6 +59,52 @@ def assign_tier(adapter: str) -> ConfidenceTier:
     return ADAPTER_TIERS[adapter]
 
 
+#: Suricata reserves 2200000-2299999 for its own engine events (decoder,
+#: stream, app-layer protocol anomalies). They describe packets the sensor
+#: could not parse, not attacker behaviour, so they never open an incident.
+ENGINE_EVENT_SID_RANGE = (2200000, 2299999)
+_suppressed_sids: frozenset[int] = frozenset()
+_suppress_engine_events = True
+
+
+def configure_noise(*, suppress_signature_ids=(), suppress_engine_events=True) -> None:
+    """Install the operator's noise policy (policy.suppress_* in config)."""
+    global _suppressed_sids, _suppress_engine_events
+    _suppressed_sids = frozenset(int(x) for x in suppress_signature_ids)
+    _suppress_engine_events = bool(suppress_engine_events)
+
+
+def is_sensor_noise(raw: Mapping[str, Any]) -> bool:
+    """True when a Suricata alert is engine telemetry or operator-suppressed."""
+    alert = raw.get("alert")
+    if not isinstance(alert, Mapping):
+        return False
+    sid = alert.get("signature_id")
+    if not isinstance(sid, int) or isinstance(sid, bool):
+        return False
+    if sid in _suppressed_sids:
+        return True
+    lo, hi = ENGINE_EVENT_SID_RANGE
+    return _suppress_engine_events and lo <= sid <= hi
+
+
+def _evidence_label(raw: Mapping[str, Any]) -> str | None:
+    """One line describing the record, from metadata fields only."""
+    alert = raw.get("alert")
+    if isinstance(alert, Mapping):
+        parts = [str(alert.get("signature") or "Suricata alert")]
+        if alert.get("signature_id"):
+            parts.append("[sid %s]" % alert["signature_id"])
+        if alert.get("category"):
+            parts.append("(%s)" % alert["category"])
+        return " ".join(parts)[:240]
+    if raw.get("note"):
+        return ("%s %s" % (raw["note"], raw.get("msg") or "")).strip()[:240]
+    bits = [str(raw[k]) for k in ("service", "conn_state", "query", "server_name")
+            if raw.get(k) not in (None, "", "-")]
+    return " ".join(bits)[:240] or None
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -114,7 +160,11 @@ def normalize(
         if hint:
             extra_signals.append(hint)
         if isinstance(raw.get("alert"), Mapping):
-            extra_signals.append("signature_hit")
+            # Suricata engine events (decoder/stream/app-layer anomalies such
+            # as "Ethertype unknown") and operator-suppressed rules are kept
+            # as telemetry, never as attack evidence.
+            extra_signals.append("sensor_noise" if is_sensor_noise(raw)
+                                 else "signature_hit")
 
     all_signals = tuple(dict.fromkeys((*signals, *extra_signals)))
 
@@ -127,6 +177,7 @@ def normalize(
             else None
         ),
         raw_payload_hash=_sha256(ref),
+        label=_evidence_label(raw),
     )
 
     return Alert(

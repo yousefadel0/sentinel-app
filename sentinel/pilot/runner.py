@@ -174,6 +174,7 @@ def _config_view(cfg):
         critical_min_score=crit_min, critical_window_s=crit_window,
         auto_threshold=auto_t, human_threshold=human_t,
         report_threshold=report_t,
+        min_risk_score=float(policy.get("min_risk_score", 0.20)),
         approval_window_s=int(policy.get("approval_timeout_minutes", 15)) * 60,
         report_window_s=int(policy.get("report_timeout_minutes", 30)) * 60,
         report_fallback_actions=tuple(policy.get("report_fallback_actions",

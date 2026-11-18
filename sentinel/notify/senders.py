@@ -19,11 +19,25 @@ def _urllib_transport(url: str, body: dict, timeout: float) -> int:
         return int(resp.status)
 
 
+_ICON = {"critical": "🔴", "high": "🟠", "medium": "🟡", "info": "🔵"}
+
+
 def _text(n) -> str:
-    lines = [f"[Sentinel/{n.severity.upper()}] {n.title}", n.body]
+    lines = [f"{_ICON.get(n.severity, '⚪')} Sentinel · {n.title}", n.body]
     if n.approval_id:
-        lines.append(f"Approval id: {n.approval_id}")
+        lines.append(f"رقم الحالة: {n.approval_id}")
     return "\n".join(lines)
+
+
+def _buttons(n) -> dict | None:
+    """Inline keyboard: approve / deny / acknowledge, straight from the phone."""
+    if not n.approval_id:
+        return None
+    aid = n.approval_id[:100]
+    return {"inline_keyboard": [[
+        {"text": "✅ اعتماد", "callback_data": f"approve:{aid}"},
+        {"text": "⛔ رفض", "callback_data": f"deny:{aid}"},
+        {"text": "👀 استلمت", "callback_data": f"ack:{aid}"}]]}
 
 
 class WebhookSender:
@@ -68,6 +82,9 @@ class TelegramSender:
         if not token:
             return False
         url = f"{self.API}/bot{token}/sendMessage"
-        status = self._transport(
-            url, {"chat_id": self._chat, "text": _text(n)}, self._timeout)
+        body = {"chat_id": self._chat, "text": _text(n)}
+        markup = _buttons(n)
+        if markup:
+            body["reply_markup"] = markup
+        status = self._transport(url, body, self._timeout)
         return 200 <= status < 300

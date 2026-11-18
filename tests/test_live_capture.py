@@ -170,7 +170,7 @@ def test_daemon_decides_once_then_only_on_escalation(tmp_path):
     store.close()
 
 
-def test_dry_run_daemon_shows_approval_without_inventing_live_liveness(tmp_path):
+def test_daemon_derives_liveness_from_real_flows(tmp_path):
     now = [datetime(2026, 10, 20, 8, 0, 30, tzinfo=timezone.utc)]
     d, store = _daemon(tmp_path, now)
     _append(tmp_path / "eve.json", _eve("2026-10-20T08:00:01+0000",
@@ -178,9 +178,10 @@ def test_dry_run_daemon_shows_approval_without_inventing_live_liveness(tmp_path)
     assert d.run_once() == 1
     decision = store.rows("decisions")[0]
     assert decision["outcome"] == "human_approval"
-    assert "dry_run_liveness_unverified" in decision["audit_events"]
     inputs = json.loads(store.rows("incident_inputs")[0]["inputs"])
-    assert inputs["liveness"] == "unknown" and inputs["dry_run_simulation"]
+    # The attacker's own flow 29 s ago is the proof: alive, not invented.
+    assert inputs["liveness"] == "alive"
+    assert d._liveness_check({"src_ip": "198.51.100.250"}) == "unknown"
     assert d._engine.pending_approvals()
     assert not any(a["executed"] for a in store.rows("actions"))
     store.close()

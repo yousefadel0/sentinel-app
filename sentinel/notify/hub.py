@@ -22,10 +22,19 @@ from sentinel.logging_setup import get_logger
 log = get_logger("sentinel.notify")
 
 NOTIFY_OUTCOMES = frozenset({"human_approval", "escalate_human", "auto_act",
-                             "auto_throttle", "notify_only"})
+                             "auto_throttle", "notify_only", "report_wait"})
 _SEVERITY = {"auto_act": "critical", "auto_throttle": "high",
              "human_approval": "high", "escalate_human": "high",
-             "notify_only": "info"}
+             "report_wait": "medium", "notify_only": "info"}
+_TITLE_AR = {"human_approval": "هجوم يحتاج موافقتك",
+             "escalate_human": "تصعيد: يحتاج قرارًا بشريًا",
+             "auto_act": "تم التصرف تلقائيًا", "auto_throttle": "تم تقييد المصدر تلقائيًا",
+             "report_wait": "تقرير ينتظر المراجعة", "notify_only": "للعلم"}
+_ACTION_AR = {"block_ip_temp": "حظر مؤقت للمصدر", "throttle_src": "تقييد سرعة المصدر",
+              "quarantine_host": "عزل الجهاز", "notify_only": "إشعار فقط",
+              "rate_limit_upstream": "تحديد المعدل عند المزوّد"}
+#: Outcomes a human can answer from the chat (buttons are attached).
+DECIDABLE = frozenset({"human_approval", "report_wait"})
 
 
 @dataclass(frozen=True)
@@ -41,16 +50,30 @@ class Notification:
 def build_notification(decision, incident) -> Notification:
     outcome = decision.outcome.value
     rec = decision.recommendation
-    action = f" — recommended: {rec.action}" if rec else ""
+    conf = (getattr(decision, "inputs", None) or {}).get("confidence")
+    from sentinel.threatintel.attack import map_incident
+    signals = tuple(getattr(incident, "signals", ()) or
+                    {s for a in getattr(incident, "alerts", ()) for s in a.signals})
+    mapping = map_incident(signals)
+    kind = mapping.attack_type if mapping else (", ".join(signals) or "suspicious activity")
+    lines = [f"النوع: {kind}",
+             f"المصدر ← الهدف: {incident.src_ip} → {incident.dst_ip}",
+             f"الخطورة {float(decision.score):.0%}"
+             + (f" · الثقة {float(conf):.0%}" if conf is not None else "")
+             + f" · {len(incident.alerts)} تنبيه"]
+    if rec:
+        lines.append(f"الإجراء المقترح: {_ACTION_AR.get(rec.action, rec.action)}")
+    lines.append(f"السبب: {decision.would}")
+    deadline = getattr(decision, "approval_deadline", None)
+    if deadline:
+        lines.append(f"المهلة حتى: {deadline.strftime('%H:%M')} UTC")
     return Notification(
-        title=f"{outcome} · {incident.src_ip} -> {incident.dst_ip}",
-        body=(f"score {float(decision.score):.0%} tier {decision.tier}"
-              f"{action}\n{decision.would}"),
+        title=f"{_TITLE_AR.get(outcome, outcome)} · {incident.src_ip} → {incident.dst_ip}",
+        body="\n".join(lines),
         severity=_SEVERITY.get(outcome, "info"),
         incident_id=decision.incident_id,
         outcome=outcome,
-        approval_id=(decision.incident_id if outcome == "human_approval"
-                     else None),
+        approval_id=(decision.incident_id if outcome in DECIDABLE else None),
     )
 
 

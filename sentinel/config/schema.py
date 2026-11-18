@@ -175,6 +175,15 @@ SCHEMA: dict[str, dict] = {
             "auth_token_env": {"type": str, "required": True},
             "allowed_ports": {"type": list, "required": True,
                               "constraints": {"item_type": int}},
+            # "token" (legacy shared header token) or "accounts" (named
+            # users, roles viewer/analyst/admin, MFA, sessions).
+            "auth_mode": {"type": str, "required": False,
+                          "constraints": {"enum": ("token", "accounts")}},
+            "accounts_db": {"type": str, "required": False,
+                            "constraints": {"min_len": 1}},
+            # accounts mode only: also accept the header token (automation).
+            # Off by default: a shared token bypasses MFA and names no one.
+            "allow_token_api": {"type": bool, "required": False},
         },
     },
     "audit_store": {
@@ -208,6 +217,15 @@ SCHEMA: dict[str, dict] = {
                 "constraints": {"min_len": 1, "item_type": str,
                                 "item_constraints": {"enum": (
                                     "throttle_src", "block_ip_temp")}}},
+            # Risk floor: an incident whose risk score (confidence x asset
+            # weight x severity) is below this is logged, never escalated.
+            "min_risk_score": {"type": (int, float), "required": False,
+                               "constraints": {"min": 0.0, "max": 0.9}},
+            # Noise control: Suricata rule IDs that never open an incident.
+            "suppress_signature_ids": {
+                "type": list, "required": False,
+                "constraints": {"item_type": int}},
+            "suppress_engine_events": {"type": bool, "required": False},
         },
     },
     "critical_response": {
@@ -239,6 +257,12 @@ SCHEMA: dict[str, dict] = {
             "chat_id": {"type": str, "required": False,
                         "constraints": {"cond_req": ("type", "telegram")}},
             "approvals": {"type": bool, "required": False},
+            # Only these Telegram user ids may approve/deny (recommended).
+            "allowed_user_ids": {"type": list, "required": False,
+                                 "constraints": {"item_type": str}},
+            # Send a daily summary at this hour (UTC, 0-23).
+            "daily_summary_hour_utc": {"type": int, "required": False,
+                                       "constraints": {"min": 0, "max": 23}},
         }},
     },
     "siem": {

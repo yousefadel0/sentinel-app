@@ -23,10 +23,18 @@ policy:
   report_threshold: 0.50
   approval_timeout_minutes: 15
   report_timeout_minutes: 30
-  report_fallback_actions: [throttle_src, block_ip_temp]
+  report_fallback_actions: [throttle_src]
+  min_risk_score: 0.20          # below this risk an incident is logged only
+  suppress_engine_events: true  # Suricata decoder/stream events are telemetry
+  suppress_signature_ids: []    # add noisy Suricata rule IDs here
+critical_response:
+  enabled: true
+  min_score: 0.80
+  deadline_minutes: 15
 audit_store: {path: /var/lib/sentinel/audit.sqlite}
 ops_ui:
   enabled: true
   bind: "127.0.0.1:8080"
   auth_token_env: SENTINEL_OPS_UI_TOKEN
   allowed_ports: [8080]
+  auth_mode: accounts           # named users + roles + MFA (sentinel ctl user add)

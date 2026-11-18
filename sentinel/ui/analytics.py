@@ -140,7 +140,11 @@ def incident_full(store: Store, incident_id: str) -> Optional[dict[str, Any]]:
         " ORDER BY id DESC LIMIT 1", (incident_id,))
     inputs = _json(inp[0][0], {}) if inp else {}
     is_replay = any(d["case_id"] == "pilot" for d in decisions)
-    return {"incident_id": incident_id, "inputs": inputs,
+    ai = [_ai_row(r) for r in store.query(
+        "SELECT ts, status, elapsed_ms, response_verbatim FROM llm_pairs"
+        " WHERE case_id IN (?, ?) ORDER BY id DESC LIMIT 3",
+        (f"live-{incident_id}", incident_id))]
+    return {"incident_id": incident_id, "inputs": inputs, "ai": ai,
             "origin": "replay" if is_replay else "live", "decisions": decisions,
             "context": contexts[-1] if contexts else None,
             "context_history": len(contexts), "notes": notes,
@@ -266,3 +270,104 @@ def autonomy_readiness(ov: dict[str, Any], level: int,
                    "غير متاح" if fp is None else f"{fp:.1%}"))
     return {"level": level, "checks": checks,
             "eligible": all(ok for _, ok, _ in checks)}
+
+
+# -- inbox: what needs a human now ------------------------------------------ #
+
+#: Outcomes that mean "a human should look" (everything else is noise/log).
+IMPORTANT_OUTCOMES = ("escalate_human", "human_approval", "auto_act",
+                      "auto_throttle", "report_wait", "notify_only")
+_OUTCOME_RANK = {o: i for i, o in enumerate(reversed(IMPORTANT_OUTCOMES))}
+
+
+def inbox(store: Store, *, hours: int = 24,
+          now: Optional[datetime] = None) -> dict[str, Any]:
+    """Attackers worth attention in the window, grouped by source address,
+    plus a one-line summary of everything that was only logged."""
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    rows = store.query(
+        "SELECT d.incident_id, d.ts, d.outcome, d.score, c.src_ip, c.dst_ip,"
+        " c.attack_type, c.alert_count, c.last_ts,"
+        " (SELECT inputs FROM incident_inputs i WHERE i.incident_id = d.incident_id"
+        " ORDER BY i.id DESC LIMIT 1), " + _LABEL + _JOIN +
+        " WHERE " + _LATEST_DECISION + " AND d.ts >= ? AND d.case_id != 'pilot'",
+        (since,))
+    groups: dict[str, dict[str, Any]] = {}
+    noise_total, noise_types = 0, {}
+    for (iid, ts, outcome, score, src, dst, atype, count, last_ts,
+         inputs_raw, label) in rows:
+        if outcome not in IMPORTANT_OUTCOMES or label in ("false_positive", "benign"):
+            noise_total += 1
+            key = atype or "Unmapped event"
+            noise_types[key] = noise_types.get(key, 0) + 1
+            continue
+        src = src or "—"
+        g = groups.setdefault(src, {
+            "src_ip": src, "incidents": 0, "alerts": 0, "targets": set(),
+            "types": set(), "max_score": 0.0, "max_conf": None,
+            "last_seen": "", "outcome": outcome, "incident_id": iid})
+        g["incidents"] += 1
+        g["alerts"] += int(count or 0)
+        if dst:
+            g["targets"].add(dst)
+        if atype:
+            g["types"].add(atype)
+        conf = _json(inputs_raw, {}).get("confidence")
+        if conf is not None:
+            g["max_conf"] = max(float(conf), g["max_conf"] or 0.0)
+        if float(score) >= g["max_score"]:
+            g["max_score"] = float(score)
+            g["incident_id"] = iid
+        if _OUTCOME_RANK.get(outcome, -1) > _OUTCOME_RANK.get(g["outcome"], -1):
+            g["outcome"] = outcome
+        g["last_seen"] = max(g["last_seen"], str(last_ts or ts))
+    attackers = sorted(groups.values(),
+                       key=lambda g: (_OUTCOME_RANK.get(g["outcome"], -1),
+                                      g["max_score"], g["last_seen"]), reverse=True)
+    for g in attackers:
+        g["targets"] = sorted(g["targets"])
+        g["types"] = sorted(g["types"])
+    return {"hours": hours, "attackers": attackers,
+            "important_incidents": sum(g["incidents"] for g in attackers),
+            "noise_total": noise_total,
+            "noise_types": sorted(noise_types.items(), key=lambda kv: -kv[1])[:8]}
+
+
+# -- AI agent (advisory) ------------------------------------------------------ #
+
+def _ai_row(row) -> dict[str, Any]:
+    """One audited LLM call; the opinion is parsed with the SAME strict
+    validator the daemon uses, so nothing unvalidated is ever displayed."""
+    ts, status, elapsed, response = row
+    item = {"ts": ts, "status": status, "elapsed_ms": elapsed, "opinion": None}
+    if status == "ok":
+        try:
+            from sentinel.brain.output import parse_output
+            r = parse_output(response)
+            item["opinion"] = {"attack_type": r.attack_type, "confidence": r.confidence,
+                               "severity": r.severity, "action": r.recommended_action,
+                               "rationale": r.rationale}
+        except Exception:
+            item["status"] = "parse_error"
+    return item
+
+
+def ai_overview(store: Store, *, hours: int = 24,
+                now: Optional[datetime] = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    since = (now - timedelta(hours=hours)).isoformat()
+    by_status = dict(store.query(
+        "SELECT status, COUNT(*) FROM llm_pairs WHERE ts >= ? GROUP BY status", (since,)))
+    lat = store.query("SELECT AVG(elapsed_ms), MAX(elapsed_ms) FROM llm_pairs"
+                      " WHERE ts >= ? AND status = 'ok'", (since,))[0]
+    recent = []
+    for case_id, ts, status, elapsed, response in store.query(
+            "SELECT case_id, ts, status, elapsed_ms, response_verbatim FROM llm_pairs"
+            " ORDER BY id DESC LIMIT 20"):
+        row = _ai_row((ts, status, elapsed, response))
+        row["incident_id"] = case_id[5:] if case_id.startswith("live-") else case_id
+        recent.append(row)
+    return {"hours": hours, "by_status": by_status,
+            "avg_ms": round(lat[0]) if lat[0] is not None else None,
+            "max_ms": lat[1], "recent": recent}

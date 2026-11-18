@@ -84,14 +84,25 @@ def test_liveness_stale_uses_verbatim_name_and_downgrades():
     assert "liveness_unknown_treated_stale" not in _names(d)
 
 
-def test_liveness_unknown_distinct_event_same_safe_effect():
+def test_liveness_unknown_escalates_instead_of_silencing():
+    """No flow proof must never silence an incident: an auto outcome becomes
+    a human escalation (the executor still refuses to act without proof)."""
     eng, _ = engine()
     from tests.fixtures.decision.helpers import IncidentStub
     a = alert("volume_spike", 1.0, crit="critical")
     d = eng.evaluate(IncidentStub([a]), Facts(liveness="unknown"))
-    assert d.outcome is Outcome.LOG_ONLY
-    assert "liveness_unknown_treated_stale" in _names(d)   # Q4: distinct name
+    assert d.outcome is Outcome.ESCALATE_HUMAN
+    assert "liveness_unverified" in _names(d)
     assert "stale_session_drift" not in _names(d)
+
+
+def test_liveness_stale_is_logged_only():
+    eng, _ = engine()
+    from tests.fixtures.decision.helpers import IncidentStub
+    a = alert("volume_spike", 1.0, crit="critical")
+    d = eng.evaluate(IncidentStub([a]), Facts(liveness="stale"))
+    assert d.outcome is Outcome.LOG_ONLY
+    assert "stale_session_drift" in _names(d)
 
 
 def test_blind_spot_vlan_single_event_single_penalty():

@@ -111,7 +111,7 @@ def test_telegram_accepts_only_configured_chat_and_exact_commands(monkeypatch):
                    (42, "/deny inc-3@bot"), (42, "approve inc-4"),
                    (42, "/approve inc-5; rm -rf /"), (42, "/deny  inc-6 "))
     ap = TelegramApprovals("TG", "42", fetch=lambda u, t: seen.append(u) or api)
-    assert ap.poll_once() == [("inc-1", True), ("inc-6", False)]
+    assert [r[:2] for r in ap.poll_once()] == [("inc-1", True), ("inc-6", False)]
     ap.poll_once()
     assert "offset=16" in seen[1]                         # acked, not replayed
     monkeypatch.delenv("TG")

@@ -158,7 +158,7 @@ def test_alert_carries_exact_section4_fields():
     assert {"adapter", "ref"} <= set(d["source"])
     assert {"resolved_hostname", "asset_id", "criticality"} == set(d["asset_hint"])
     assert {"packet_count", "byte_count", "duration_seconds",
-            "raw_payload_hash"} == set(d["meta"])
+            "raw_payload_hash", "label"} == set(d["meta"])
 
 
 def test_confidence_bounds_and_tiers_enforced():

@@ -301,7 +301,8 @@ def test_telegram_ack_command(monkeypatch):
                       {"update_id": 2, "message": {"chat": {"id": 42}, "text": "/approve inc-9"}},
                       {"update_id": 3, "message": {"chat": {"id": 7}, "text": "/ack inc-9"}}]}
     ap = TelegramApprovals("TG", "42", fetch=lambda u, t: api)
-    assert ap.poll_once() == [("inc-9", None), ("inc-9", True)]
+    assert ap.poll_once() == [("inc-9", None, "telegram:?#?"),
+                              ("inc-9", True, "telegram:?#?")]
 
 
 # -- full path through the daemon with a real HTTP SOAR ----------------------------------------------
