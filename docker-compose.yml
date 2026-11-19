@@ -55,6 +55,8 @@ services:
       SENTINEL_LLM_API: ${SENTINEL_LLM_API:-}
       NVD_API_KEY: ${NVD_API_KEY:-}
       SENTINEL_SOAR_TOKEN: ${SENTINEL_SOAR_TOKEN:-}
+      SENTINEL_TELEGRAM_TOKEN: ${SENTINEL_TELEGRAM_TOKEN:-}
+      SENTINEL_WEBHOOK_URL: ${SENTINEL_WEBHOOK_URL:-}
     volumes:
       - sensor-logs:/logs
       - ${SENTINEL_CONFIG_FILE:-./config.container.yaml}:/etc/sentinel/config.yaml:ro
